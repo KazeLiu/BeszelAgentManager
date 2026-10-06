@@ -18,11 +18,7 @@ using Microsoft.Win32;
 const string serviceName = "Beszel Agent";
 const string legacyServiceName = "BeszelAgentManager";
 const string agentRepo = "henrygd/beszel";
-const string managerRepo = "MiranoVerhoef/BeszelAgentManager";
 const string agentZipName = "beszel-agent_windows_amd64.zip";
-const string managerBundledInstallerName = "BeszelAgentManagerSetup.exe";
-const string managerLiteInstallerName = "BeszelAgentManagerSetup-Lite.exe";
-const string managerChecksumName = "SHA256SUMS.txt";
 const string firewallRuleName = "Beszel Agent";
 const string updateTaskName = "BeszelAgentManagerUpdate";
 const string agentLogRotateTaskName = "BeszelAgentManagerAgentLogRotate";
@@ -865,7 +861,9 @@ static async Task HandleBrokerConnectionAsync(
                 var exitCode = await ExecuteBrokerActionAsync(request);
                 var response = exitCode == 0
                     ? BrokerResponse.Completed(request.RequestId)
-                    : BrokerResponse.Failed(request.RequestId, exitCode, "The privileged action failed.");
+                    : BrokerResponse.Failed(request.RequestId, exitCode, exitCode == 58
+                        ? "Signed manager updates are not configured. Install the official release manually."
+                        : "The privileged action failed.");
                 await WriteBrokerResponseAsync(pipe, response);
             }
             finally
@@ -930,9 +928,10 @@ static async Task<int> ExecuteBrokerActionAsync(BrokerRequest request)
         "agent.fingerprint.reset" => await ResetAgentFingerprintAsync(),
         "agent.fingerprint.import" when TryReadFingerprint(arguments, out var fingerprint) => await ImportAgentFingerprintAsync(fingerprint),
         "defender.set" when TryReadBoolean(arguments, "enabled", out var enabled) => await SetDefenderExclusionAsync(enabled),
-        "manager.installVersion" when TryReadManagerTag(arguments, out var tag)
-            && TryReadManagerVariant(arguments, out var variant)
-            && TryReadRelaunchToken(arguments, out var relaunchToken) => await InstallManagerVersionAsync(tag, variant, relaunchToken),
+        // Do not expose the legacy launcher while signed-update trust and secure
+        // installer/staging integration are not configured. No checksum-only or
+        // any-valid-Authenticode fallback may bypass the new metadata verifier.
+        "manager.installVersion" => 58,
         _ => 2,
     };
 }
@@ -1896,17 +1895,7 @@ static bool TryReadFingerprint(Dictionary<string, string> arguments, out string 
     return Regex.IsMatch(fingerprint, @"\A[0-9a-f]{48}\z", RegexOptions.CultureInvariant);
 }
 
-static bool TryReadManagerTag(Dictionary<string, string> arguments, out string tag)
-{
-    tag = arguments.GetValueOrDefault("tag")?.Trim() ?? string.Empty;
-    return Regex.IsMatch(tag, @"^v?\d+\.\d+\.\d+(?:-rc\d+)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-}
 
-static bool TryReadManagerVariant(Dictionary<string, string> arguments, out string variant)
-{
-    variant = arguments.GetValueOrDefault("variant")?.Trim().ToLowerInvariant() ?? "bundled";
-    return variant is "bundled" or "lite";
-}
 
 static bool HasRetryStrategyConflict(JsonElement config)
 {
@@ -2189,11 +2178,6 @@ static string AgentLogPath() => Path.Combine(
     "agent_logs",
     "beszel-agent.log");
 
-static bool TryReadRelaunchToken(Dictionary<string, string> arguments, out string token)
-{
-    token = arguments.GetValueOrDefault("relaunchToken")?.Trim().ToLowerInvariant() ?? string.Empty;
-    return Guid.TryParseExact(token, "N", out _);
-}
 
 static bool TryReadBoolean(Dictionary<string, string> arguments, string key, out bool value)
 {
@@ -3435,88 +3419,6 @@ static async Task<AgentRelease?> FetchLatestAgentReleaseAsync()
     return ParseAgentRelease(document.RootElement);
 }
 
-static async Task<int> InstallManagerVersionAsync(string tag, string variant, string relaunchToken)
-{
-    try
-    {
-        var installedVersion = FileVersionInfo.GetVersionInfo(Environment.ProcessPath!).ProductVersion ?? "0.0.0";
-        if (!SecureVersionPolicy.IsSameOrNewer(tag, installedVersion))
-        {
-            WriteBackgroundLog("WARN", $"Broker manager downgrade from {NormalizeVersion(installedVersion)} to {tag} rejected.");
-            return 56;
-        }
-
-        var installerName = variant == "lite"
-            ? managerLiteInstallerName
-            : managerBundledInstallerName;
-        using var http = CreateGitHubClient();
-        var releaseUrl = $"https://api.github.com/repos/{managerRepo}/releases/tags/{Uri.EscapeDataString(tag)}";
-        await using var releaseStream = await http.GetStreamAsync(releaseUrl);
-        using var release = await JsonDocument.ParseAsync(releaseStream);
-        if (!TryGetReleaseAssetUrl(release.RootElement, installerName, out var installerUrl)
-            || !TryGetReleaseAssetUrl(release.RootElement, managerChecksumName, out var checksumUrl))
-        {
-            return 30;
-        }
-
-        var stagingRoot = Path.Combine(ServiceDataPath(), "manager-update");
-        ResetPrivilegedWorkingDirectory(stagingRoot);
-
-        var installerPath = Path.Combine(stagingRoot, installerName);
-        var checksumPath = Path.Combine(stagingRoot, managerChecksumName);
-        await DownloadFileAsync(http, installerUrl, installerPath, 512L * 1024 * 1024);
-        await DownloadFileAsync(http, checksumUrl, checksumPath, 1024 * 1024);
-        if (new FileInfo(installerPath).Attributes.HasFlag(FileAttributes.ReparsePoint)
-            || !VerifyManagerInstallerChecksum(installerPath, checksumPath, installerName)
-            || !await VerifyManagerInstallerSignatureAsync(installerPath))
-        {
-            TryDeleteFile(installerPath);
-            return 31;
-        }
-
-        var policy = LoadBrokerPolicy();
-        if (policy is null || !IsValidAccountSid(policy.AuthorizedSid))
-        {
-            return 32;
-        }
-
-        GrantAuthorizedUserReadAccess(stagingRoot, policy.AuthorizedSid);
-        var completionMarker = Path.Combine(stagingRoot, $"relaunch-{relaunchToken}.complete");
-        var setupLogPath = Path.Combine(stagingRoot, "manager-update-setup.log");
-        var escapedInstaller = installerPath.Replace("'", "''", StringComparison.Ordinal);
-        var escapedCompletionMarker = completionMarker.Replace("'", "''", StringComparison.Ordinal);
-        var escapedSetupLog = setupLogPath.Replace("'", "''", StringComparison.Ordinal);
-        var command =
-            "$exitCode = 1; try { Start-Sleep -Seconds 3; " +
-            $"$setup = Start-Process -FilePath '{escapedInstaller}' " +
-            $"-ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/LOG={escapedSetupLog}') " +
-            "-Wait -PassThru; $exitCode = $setup.ExitCode } finally { " +
-            $"[System.IO.File]::WriteAllText('{escapedCompletionMarker}', $exitCode.ToString()) }}";
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            ArgumentList =
-            {
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle", "Hidden",
-                "-Command", command,
-            },
-        });
-        return 0;
-    }
-    catch (HttpRequestException)
-    {
-        return 30;
-    }
-    catch (Exception ex)
-    {
-        WriteBackgroundLog("ERROR", $"Manager installer staging failed: {ex}");
-        return 32;
-    }
-}
 
 static void ResetPrivilegedWorkingDirectory(string path)
 {
@@ -3616,53 +3518,7 @@ static void ApplyRestrictedFileSecurity(string path, bool setProtectedOwner)
     new FileInfo(path).SetAccessControl(security);
 }
 
-static void GrantAuthorizedUserReadAccess(string path, string authorizedSid)
-{
-    var fullPath = Path.GetFullPath(path);
-    var managerData = Path.GetFullPath(ServiceDataPath()).TrimEnd(Path.DirectorySeparatorChar);
-    if ((!fullPath.Equals(managerData, StringComparison.OrdinalIgnoreCase)
-            && !fullPath.StartsWith(managerData + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-        || !Directory.Exists(fullPath)
-        || File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint))
-    {
-        throw new IOException("Manager update staging directory is unsafe.");
-    }
 
-    var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-    var security = new DirectoryInfo(fullPath).GetAccessControl();
-    security.AddAccessRule(new FileSystemAccessRule(
-        new SecurityIdentifier(authorizedSid),
-        FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
-        inheritance,
-        PropagationFlags.None,
-        AccessControlType.Allow));
-    new DirectoryInfo(fullPath).SetAccessControl(security);
-}
-
-static bool TryGetReleaseAssetUrl(JsonElement release, string expectedName, out string url)
-{
-    url = string.Empty;
-    if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
-    {
-        return false;
-    }
-
-    foreach (var asset in assets.EnumerateArray())
-    {
-        var name = asset.TryGetProperty("name", out var nameProperty) ? nameProperty.GetString() : null;
-        if (!string.Equals(name, expectedName, StringComparison.OrdinalIgnoreCase))
-        {
-            continue;
-        }
-
-        url = asset.TryGetProperty("browser_download_url", out var urlProperty)
-            ? urlProperty.GetString() ?? string.Empty
-            : string.Empty;
-        return IsTrustedGitHubAssetUrl(url);
-    }
-
-    return false;
-}
 
 static bool IsTrustedGitHubAssetUrl(string url)
 {
@@ -3703,38 +3559,7 @@ static async Task DownloadFileAsync(HttpClient http, string url, string path, lo
     }
 }
 
-static bool VerifyManagerInstallerChecksum(string installerPath, string checksumPath, string installerName)
-{
-    var checksumPattern = $@"^\s*([a-fA-F0-9]{{64}})\s+\*?{Regex.Escape(installerName)}\s*$";
-    var expected = File.ReadLines(checksumPath)
-        .Select(line => Regex.Match(line, checksumPattern, RegexOptions.CultureInvariant))
-        .FirstOrDefault(static match => match.Success)?
-        .Groups[1].Value;
-    if (string.IsNullOrWhiteSpace(expected))
-    {
-        return false;
-    }
 
-    using var stream = File.OpenRead(installerPath);
-    var actual = Convert.ToHexString(SHA256.HashData(stream));
-    return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
-}
-
-static async Task<bool> VerifyManagerInstallerSignatureAsync(string installerPath)
-{
-    var escapedPath = installerPath.Replace("'", "''", StringComparison.Ordinal);
-    var result = await RunProcessAsync(
-        Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-        [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            $"(Get-AuthenticodeSignature -LiteralPath '{escapedPath}').Status.ToString()",
-        ]);
-    var status = result.Output.Trim();
-    return result.ExitCode == 0
-        && string.Equals(status, "Valid", StringComparison.OrdinalIgnoreCase);
-}
 
 static async Task<AgentRelease?> FetchAgentReleaseAsync(string version)
 {
