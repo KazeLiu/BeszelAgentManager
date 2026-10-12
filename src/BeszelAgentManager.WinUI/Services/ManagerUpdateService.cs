@@ -73,7 +73,18 @@ internal sealed class ManagerUpdateService
             GetString(element, "body"),
             downloadUrl,
             element.TryGetProperty("prerelease", out var prerelease) && prerelease.GetBoolean(),
-            publishedAt);
+            publishedAt,
+            HasUpdateMetadata(element));
+    }
+
+    private static bool HasUpdateMetadata(JsonElement release)
+    {
+        // Presence is a presentation hint, never proof of trust. Partial metadata
+        // must still reach the broker and fail verification, not a manual fallback.
+        return release.TryGetProperty("assets", out var assets)
+            && assets.ValueKind == JsonValueKind.Array
+            && assets.EnumerateArray().Any(asset => GetString(asset, "name")
+                is "targets.json" or "snapshot.json" or "timestamp.json");
     }
 
     private async Task ApplyGitHubHeadersAsync(HttpRequestMessage request, CancellationToken cancellationToken)

@@ -1,11 +1,12 @@
-# 4.21.1 private installer validation
+# 4.21.1 installer and updater validation
 
 Do these checks on a disposable Windows VM with a snapshot, not a production
-machine. Both test installers are RC builds. Keep build artifacts, results,
-and the private pull request private until release approval.
+machine. Both test installers are RC builds. Record the exact tag, commit and
+installer hashes being tested. Keep advisory-related builds/results private until
+disclosure approval; published follow-up builds use the normal release procedure.
 
 1. Install Bundled cleanly. Leave launch unchecked, then open it manually.
-   Confirm the displayed version is 4.21.1-rc1, background service runs as
+   Confirm the displayed version matches the candidate tag, background service runs as
    LocalSystem, and Start/Stop/Restart/Apply work without routine UAC.
 2. Install Lite on a separate snapshot without .NET 10 Desktop Runtime x64.
    Confirm the prerequisite prompt; install the runtime and retry. Test both
@@ -20,14 +21,21 @@ and the private pull request private until release approval.
 5. Exercise Extra repair/check, scheduled update/restart/log rotation, DNS
    fallback, close-to-tray, hidden startup, reboot, uninstall with retained
    logs, and reinstall. Confirm another user cannot send privileged requests.
-6. Click Update Manager before official signed metadata exists. Confirm a
-   verification error with no installer execution and no claimed completion.
+6. For RC2, choose an older release without update metadata. Confirm the neutral
+   Download dialog names the correct edition, Cancel does nothing, and Open release
+   page opens only the official page; no installer runs automatically. For a release
+   advertising partial, invalid or expired metadata, confirm a friendly verification
+   error with no installer execution, manual fallback or claimed completion.
    Caller-chosen tag/path/URL/edition requests and legacy manager.installVersion
    must remain rejected.
-7. After approval of a signed official RC release, test a genuine GUI update
-   for both editions. It must exit normally, install once without UAC, reopen
+7. After approval/publication of signed RC2 assets, start with RC1 installed and
+   enable Include prereleases under Manager update settings. Test a genuine GUI
+   update for both editions. Cancel once at the verified-update confirmation;
+   RC1 must remain open and installed. Then approve installation. It must exit
+   normally, install once without UAC, reopen
    unelevated in the same user's session, and show the new version only after
-   service/edition checks succeed. Do not create a public release solely to
+   service/edition checks succeed. Confirm the final result in the protected logs.
+   Do not create a public release solely to
    test an unapproved security build.
 8. In isolated verifier tests, alter metadata/installers, replay old counters,
    expire timestamp/targets, move the clock backward, cancel downloads and

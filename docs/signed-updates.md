@@ -62,6 +62,11 @@ inspect the protected installer log and process state before operator recovery.
 
 ## Operator release approval
 
+Follow the [release procedure](releasing.md) for every RC and stable release.
+Sign the exact approved release assets, not a different local rebuild; verify the
+assembled draft before publication. Test approval and publication approval are
+separate gates.
+
 Build the local operator tool:
 
 ```powershell

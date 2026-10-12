@@ -1,5 +1,6 @@
 using BeszelAgentManager.WinUI.Pages;
 using BeszelAgentManager.WinUI.Services;
+using BeszelAgentManager.Core.Updates;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -605,7 +606,7 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             App.Logger.Error($"Manager update check failed: {ex}");
-            ShowGlobalStatus(InfoBarSeverity.Error, "Update check failed", ex.Message);
+            ShowGlobalStatus(InfoBarSeverity.Warning, "Could not check for updates", "Please try again later. Technical details are available in the log.");
         }
         finally
         {
@@ -1318,7 +1319,7 @@ public sealed partial class MainWindow : Window
             versionSection.Children.Add(new TextBlock { Text = "Open an installer release", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
             versionSection.Children.Add(new TextBlock
             {
-                Text = "The latest release uses signed update verification. Older releases open GitHub for manual installation with administrator approval.",
+                Text = "Verified updates install through the background service. Other versions can be downloaded from the official release page and installed manually.",
                 Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
                 TextWrapping = TextWrapping.Wrap,
             });
@@ -1361,14 +1362,13 @@ public sealed partial class MainWindow : Window
             if (selected.Tag == releases[0].Tag) await InstallManagerReleaseAsync(selected);
             else
             {
-                OpenUrl($"https://github.com/{AppInfo.ManagerRepo}/releases/tag/{Uri.EscapeDataString(selected.Tag)}");
-                ShowGlobalStatus(InfoBarSeverity.Informational, "Manual installation required", "Older versions cannot be installed through the privileged updater.");
+                await ShowManualManagerDownloadAsync(selected);
             }
         }
         catch (Exception ex)
         {
             App.Logger.Error($"Manager version manager failed: {ex}");
-            ShowGlobalStatus(InfoBarSeverity.Error, "Manager version manager failed", ex.Message);
+            ShowGlobalStatus(InfoBarSeverity.Warning, "Could not load manager versions", "Please try again later. Technical details are available in the log.");
         }
     }
 
@@ -1460,9 +1460,24 @@ public sealed partial class MainWindow : Window
 
     private async Task InstallManagerReleaseAsync(ManagerRelease release)
     {
+        if (!release.HasUpdateMetadata)
+        {
+            await ShowManualManagerDownloadAsync(release);
+            return;
+        }
         if (!await EnsureBackgroundServiceAvailableAsync()) return;
         ShowGlobalStatus(InfoBarSeverity.Informational, "Verifying signed update", "Downloading and verifying the latest official release for this installation. The application will remain open until you confirm installation.");
-        var staged = await App.Broker.PrepareManagerUpdateAsync();
+        ManagerUpdateStage staged;
+        try
+        {
+            staged = await App.Broker.PrepareManagerUpdateAsync();
+        }
+        catch (Exception ex)
+        {
+            App.Logger.Error($"Signed manager update verification failed: {ex}");
+            ShowGlobalStatus(InfoBarSeverity.Error, "Update could not be verified", "Installation was not started. Please try again later. Technical details are available in the log.");
+            return;
+        }
         var confirm = new ContentDialog
         {
             XamlRoot = NavView.XamlRoot,
@@ -1481,9 +1496,39 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        await App.Broker.CommitManagerUpdateAsync(staged.OperationId);
+        try
+        {
+            await App.Broker.CommitManagerUpdateAsync(staged.OperationId);
+        }
+        catch (Exception ex)
+        {
+            App.Logger.Error($"Signed manager update commit failed: {ex}");
+            ShowGlobalStatus(InfoBarSeverity.Error, "Update could not be started", "The manager will remain open. Check the log before trying again.");
+            return;
+        }
         App.Logger.Info($"Signed manager update accepted for {staged.Tag}; completion pending installer verification.");
         ExitFromTray();
+    }
+
+    private async Task ShowManualManagerDownloadAsync(ManagerRelease release)
+    {
+        var dialog = new ContentDialog
+        {
+            XamlRoot = NavView.XamlRoot,
+            Title = $"Download BeszelAgentManager {release.Version}",
+            Content = new TextBlock
+            {
+                Text = $"This version needs to be installed manually. Open the official release page, download {AppInfo.InstallerAssetName}, and run it to update. Windows will ask for administrator approval.",
+                TextWrapping = TextWrapping.Wrap,
+            },
+            PrimaryButtonText = "Open release page",
+            CloseButtonText = "Cancel",
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            OpenUrl($"https://github.com/{AppInfo.ManagerRepo}/releases/tag/{Uri.EscapeDataString(release.Tag)}");
+        }
     }
 
     private void VersionBadgeButton_Click(object sender, RoutedEventArgs e)
