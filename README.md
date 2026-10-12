@@ -105,7 +105,11 @@ Agent assets are selected only from the official Beszel GitHub repository. Every
 
 Manager update checks use only the hardcoded project repository. Bundled installations select the standard installer; Lite installations select the Lite installer from a protected installation marker. The background service verifies project-signed TUF metadata, installer hash/size, freshness, and persistent rollback history before launching a fixed installer command. Missing, expired, or invalid metadata stops installation; there is no unsigned fallback. Success requires post-install version, edition, and service verification.
 
-Existing installations need a manual bootstrap upgrade to this trust-enabled build. Windows publisher signing and SmartScreen reputation are separate from these updater signatures. See [signed update operation](docs/signed-updates.md) for release approval, limited-key freshness renewal, and recovery.
+Automatic manager updates are authorized by release metadata signed with the project's private keys. The application verifies these signatures against its embedded trusted public keys and checks the exact installer hashes, rejecting automatic updates that have not been approved by the project.
+
+This is separate from Windows Authenticode publisher signing: the `.exe` files are not yet Windows publisher-signed, so Windows may still show publisher or SmartScreen warnings. Authenticode signing is planned for a future release, subject to the project's acceptance by an open-source code-signing foundation or program.
+
+Existing installations need a manual bootstrap upgrade to this trust-enabled build. See [signed update operation](docs/signed-updates.md) for release approval, limited-key freshness renewal, and recovery.
 
 ## Uninstall behavior
 
