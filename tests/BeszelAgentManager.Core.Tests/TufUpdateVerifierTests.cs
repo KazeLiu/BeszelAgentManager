@@ -320,6 +320,79 @@ public sealed class TufUpdateVerifierTests
     [InlineData("4.21.0-rc1\n")]
     public void ReleaseTagsAreStrict(string tag) => Assert.False(TufUpdateVerifier.IsValidTag(tag));
 
+    [Fact]
+    public async Task InterruptedRefreshKeepsVerifiedHistoryAndRejectsReplay()
+    {
+        using var fixture = new Fixture(counter: 2);
+        var saved = fixture.State;
+        var downloaded = new List<string>();
+        var checkpoints = new List<TufTrustState>();
+        Task<byte[]> Fetch(string name, CancellationToken token)
+        {
+            downloaded.Add(name);
+            return name switch
+            {
+                "timestamp.json" => Task.FromResult(fixture.Timestamp),
+                "snapshot.json" => Task.FromResult(fixture.Snapshot),
+                _ => throw new IOException("Interrupted targets download"),
+            };
+        }
+        Task Save(TufTrustState state, CancellationToken token)
+        {
+            saved = state;
+            checkpoints.Add(state);
+            return Task.CompletedTask;
+        }
+        await Assert.ThrowsAsync<IOException>(() => TufRefreshCoordinator.RefreshAsync(fixture.State,
+            Fetch, Save, "bundled", "4.0.10", false, Now, TestContext.Current.CancellationToken));
+        Assert.Equal(2, checkpoints.Count);
+        Assert.Equal(2, saved.TimestampVersion);
+        Assert.Equal(2, saved.SnapshotVersion);
+        Assert.Equal(0, saved.TargetsVersion);
+        var stale = Change(fixture.Timestamp, n =>
+        {
+            n["signed"]!["version"] = 1;
+            n["signatures"] = new JsonArray();
+        });
+        stale = TufMetadataBuilder.Sign(stale, fixture.Keys["timestamp"]);
+        var error = Assert.Throws<UpdateMetadataException>(() => TufUpdateVerifier.AcceptTimestamp(saved, stale, Now));
+        Assert.Contains("rollback", error.Message);
+    }
+
+    [Fact]
+    public async Task FailedCheckpointPreventsFurtherNetworkWork()
+    {
+        using var fixture = new Fixture();
+        var downloads = 0;
+        await Assert.ThrowsAsync<IOException>(() => TufRefreshCoordinator.RefreshAsync(fixture.State,
+            (name, token) => { downloads++; return Task.FromResult(fixture.Timestamp); },
+            (state, token) => throw new IOException("Checkpoint failed"),
+            "bundled", "4.0.10", false, Now, TestContext.Current.CancellationToken));
+        Assert.Equal(1, downloads);
+    }
+
+    [Fact]
+    public async Task SuccessfulRefreshPersistsEachStageBeforeReturningTarget()
+    {
+        using var fixture = new Fixture();
+        var stages = new List<string>();
+        var result = await TufRefreshCoordinator.RefreshAsync(fixture.State,
+            (name, token) =>
+            {
+                stages.Add(name);
+                return Task.FromResult(name switch
+                {
+                    "timestamp.json" => fixture.Timestamp,
+                    "snapshot.json" => fixture.Snapshot,
+                    _ => fixture.Targets,
+                });
+            },
+            (state, token) => { stages.Add("saved"); return Task.CompletedTask; },
+            "lite", "4.0.10", false, Now, TestContext.Current.CancellationToken);
+        Assert.Equal(new[] { "timestamp.json", "saved", "snapshot.json", "saved", "targets.json", "saved" }, stages);
+        Assert.Equal("lite", result.Target.Edition);
+    }
+
     private static byte[] Change(byte[] input, Action<JsonNode> edit)
     {
         var node = JsonNode.Parse(input)!;
@@ -333,8 +406,8 @@ public sealed class TufUpdateVerifierTests
         internal byte[] Installer { get; } = Encoding.UTF8.GetBytes("MZ approved test payload, not executable");
         internal byte[] Root { get; }
         internal byte[] Targets { get; set; }
-        private byte[] Snapshot { get; set; } = [];
-        private byte[] Timestamp { get; set; } = [];
+        internal byte[] Snapshot { get; set; } = [];
+        internal byte[] Timestamp { get; set; } = [];
         internal TufTrustState State { get; }
         private readonly DateTimeOffset _expiry;
         private readonly long _counter;

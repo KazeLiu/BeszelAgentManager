@@ -47,6 +47,31 @@ public static class TufUpdateVerifier
             : state with { Root = next };
     }
 
+    public static TufTrustState AcceptTimestamp(TufTrustState state,
+        ReadOnlyMemory<byte> bytes, DateTimeOffset now)
+    {
+        Require(state.LastVerifiedUtc is null || now >= state.LastVerifiedUtc,
+            "Clock moved backwards; updates are paused.");
+        CheckFreshness(state.Root, now);
+        var timestamp = ReadRole(bytes, state.Root, "timestamp", now);
+        var hash = TufJson.Sha256(bytes.Span);
+        CheckHistory(timestamp, hash, state.TimestampVersion, state.TimestampHash);
+        return state with { TimestampVersion = Version(timestamp), TimestampHash = hash, LastVerifiedUtc = now };
+    }
+
+    public static TufTrustState AcceptSnapshot(TufTrustState state,
+        ReadOnlyMemory<byte> timestampBytes, ReadOnlyMemory<byte> snapshotBytes, DateTimeOffset now)
+    {
+        Require(state.TimestampHash == TufJson.Sha256(timestampBytes.Span),
+            "Accept and persist timestamp before accepting snapshot.");
+        state = AcceptTimestamp(state, timestampBytes, now);
+        CheckBoundMetadata(TufJson.Parse(timestampBytes), "snapshot.json", snapshotBytes);
+        var snapshot = ReadRole(snapshotBytes, state.Root, "snapshot", now);
+        var hash = TufJson.Sha256(snapshotBytes.Span);
+        CheckHistory(snapshot, hash, state.SnapshotVersion, state.SnapshotHash);
+        return state with { SnapshotVersion = Version(snapshot), SnapshotHash = hash };
+    }
+
     public static VerifiedManagerUpdate Verify(TufTrustState state,
         ReadOnlyMemory<byte> timestampBytes, ReadOnlyMemory<byte> snapshotBytes,
         ReadOnlyMemory<byte> targetsBytes, string edition, string installedTag,

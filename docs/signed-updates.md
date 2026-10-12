@@ -2,10 +2,15 @@
 
 ## Status and release gates
 
-The metadata verifier and local signing tool are implemented. They are **not yet
+The metadata verifier, staged refresh coordinator and local signing tool are implemented. They are **not yet
 connected to a SYSTEM installer launch**. The GUI remains manual-update-only;
 the legacy `manager.installVersion` broker action returns error 58. The old
 checksum/any-valid-Authenticode launcher has been removed, not retained as a fallback.
+
+The refresh coordinator awaits a durable checkpoint after each verified role,
+before fetching the next role. Interrupted downloads retain accepted history;
+checkpoint failures abort the refresh. Its transport/storage callbacks are not
+yet connected to service-controlled HTTP and protected filesystem storage.
 
 Before enabling automatic installation:
 
