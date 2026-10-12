@@ -166,6 +166,59 @@ public sealed class OfficialUpdateTransportTests
     }
 
     private static HttpResponseMessage Ok(byte[] data) => new(HttpStatusCode.OK) { Content = new ByteArrayContent(data) };
+    [Fact]
+    public async Task InstallerDownloadUsesSignedEditionAndExactSize()
+    {
+        using var handler = new Handler((request, _) =>
+        {
+            Assert.EndsWith("/4.21.1/BeszelAgentManagerSetup-Lite.exe", request.RequestUri!.AbsoluteUri);
+            Assert.Null(request.Headers.Authorization);
+            return Task.FromResult(Ok([1, 2, 3]));
+        });
+        using var transport = new OfficialUpdateTransport(handler);
+        using var output = new MemoryStream();
+        await transport.DownloadInstallerAsync(new ManagerUpdateTarget("4.21.1", "lite", "BeszelAgentManagerSetup-Lite.exe", 3, new string('a', 64)),
+            output, TestContext.Current.CancellationToken);
+        Assert.Equal(new byte[] { 1, 2, 3 }, output.ToArray());
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public async Task InstallerWrongLengthIsRejected(long length)
+    {
+        using var handler = new Handler((_, _) => Task.FromResult(Ok([1, 2, 3])));
+        using var transport = new OfficialUpdateTransport(handler);
+        using var output = new MemoryStream();
+        await Assert.ThrowsAsync<UpdateMetadataException>(() => transport.DownloadInstallerAsync(
+            new ManagerUpdateTarget("4.21.1", "bundled", "BeszelAgentManagerSetup.exe", length, new string('a', 64)),
+            output, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task WrongEditionFilenameNeverReachesNetwork()
+    {
+        using var handler = new Handler((_, _) => throw new Xunit.Sdk.XunitException("Network should not run"));
+        using var transport = new OfficialUpdateTransport(handler);
+        using var output = new MemoryStream();
+        await Assert.ThrowsAsync<UpdateMetadataException>(() => transport.DownloadInstallerAsync(
+            new ManagerUpdateTarget("4.21.1", "lite", "BeszelAgentManagerSetup.exe", 3, new string('a', 64)),
+            output, TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task PrereleaseLookupOrdersRcNumbersAndIgnoresDrafts()
+    {
+        using var handler = new Handler((request, _) =>
+        {
+            Assert.Equal("api.github.com", request.RequestUri!.Host);
+            return Task.FromResult(Ok(System.Text.Encoding.UTF8.GetBytes(
+                """[{"tag_name":"4.21.1-rc9","draft":false},{"tag_name":"4.21.1-rc10","draft":false},{"tag_name":"4.99.0","draft":true}]""")));
+        });
+        using var transport = new OfficialUpdateTransport(handler);
+        Assert.Equal("4.21.1-rc10", await transport.SelectMetadataReleaseAsync(true, TestContext.Current.CancellationToken));
+        Assert.Null(await transport.SelectMetadataReleaseAsync(false, TestContext.Current.CancellationToken));
+    }
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

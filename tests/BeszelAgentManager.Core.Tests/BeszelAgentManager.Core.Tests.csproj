@@ -15,5 +15,7 @@
     <Compile Include="..\..\src\BeszelAgentManager.WinUI\Services\AgentConfig.cs" Link="AgentConfig.cs" />
     <Compile Include="..\..\src\BeszelAgentManager.Helper\Updates\PinnedLocalPath.cs" Link="PinnedLocalPath.cs" />
     <Compile Include="..\..\src\BeszelAgentManager.Helper\Updates\ProtectedUpdateStore.cs" Link="ProtectedUpdateStore.cs" />
+    <Compile Include="..\..\src\BeszelAgentManager.Helper\Updates\SafeFileTree.cs" Link="SafeFileTree.cs" />
+    <Compile Include="..\..\src\BeszelAgentManager.Helper\Updates\SafeSecurityTree.cs" Link="SafeSecurityTree.cs" />
   </ItemGroup>
 </Project>

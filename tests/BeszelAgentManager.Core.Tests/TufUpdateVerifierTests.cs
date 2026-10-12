@@ -459,6 +459,40 @@ public sealed class TufUpdateVerifierTests
         return JsonSerializer.SerializeToUtf8Bytes(node);
     }
 
+    [Fact]
+    public void RenewalCannotApproveInstallersWithOnlineKeys()
+    {
+        using var fixture = new Fixture();
+        Assert.Equal("4.21.0", TufUpdateVerifier.ValidateRenewalTargets(fixture.State, fixture.Targets, Now));
+        Assert.True(TufUpdateVerifier.IsAuthorizedRenewalKey(fixture.State, "snapshot", fixture.Keys["snapshot"]));
+        Assert.False(TufUpdateVerifier.IsAuthorizedRenewalKey(fixture.State, "snapshot", fixture.Keys["targets"]));
+        Assert.Throws<UpdateMetadataException>(() => TufUpdateVerifier.IsAuthorizedRenewalKey(fixture.State, "targets", fixture.Keys["targets"]));
+        fixture.Resign("targets", fixture.Keys["snapshot"]);
+        Assert.Throws<UpdateMetadataException>(() => TufUpdateVerifier.ValidateRenewalTargets(fixture.State, fixture.Targets, Now));
+    }
+
+    [Fact]
+    public void RenewalUsesAuthenticatedExpiredOnlineCountersButRequiresFreshTargets()
+    {
+        using var fixture = new Fixture(counter: 17);
+        fixture.ChangeRole("timestamp", n => n["signed"]!["expires"] = "2020-01-01T00:00:00Z");
+        fixture.Resign("timestamp", fixture.Keys["timestamp"]);
+        Assert.Equal(17, TufUpdateVerifier.ReadRenewalCounter(fixture.State, fixture.Timestamp, "timestamp"));
+        Assert.Throws<UpdateMetadataException>(() => fixture.Verify());
+        fixture.ChangeRole("targets", n => n["signed"]!["expires"] = "2020-01-01T00:00:00Z");
+        fixture.Resign("targets", fixture.Keys["targets"]);
+        Assert.Throws<UpdateMetadataException>(() => TufUpdateVerifier.ValidateRenewalTargets(fixture.State, fixture.Targets, Now));
+    }
+
+    [Fact]
+    public void RenewalRejectsUnauthenticatedCounters()
+    {
+        using var fixture = new Fixture();
+        fixture.ChangeRole("snapshot", n => n["signed"]!["version"] = long.MaxValue);
+        Assert.Throws<UpdateMetadataException>(() => TufUpdateVerifier.ReadRenewalCounter(fixture.State, fixture.Snapshot, "snapshot"));
+        Assert.Throws<UpdateMetadataException>(() => TufUpdateVerifier.ReadRenewalCounter(fixture.State, fixture.Targets, "targets"));
+    }
+
     private sealed class Fixture : IDisposable
     {
         internal Dictionary<string, ECDsa> Keys { get; } = new();

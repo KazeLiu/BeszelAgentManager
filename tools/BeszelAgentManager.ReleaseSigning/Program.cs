@@ -64,6 +64,28 @@ try
                 ReadMetadata(args[4]), args[5], args[6], includePrereleases: true, DateTimeOffset.UtcNow);
             Console.WriteLine($"Verified {verified.Target.Tag} ({verified.Target.Edition}): {verified.Target.Sha256}");
             break;
+        case "verify-release" when args.Length == 4:
+            var releaseState = PinnedUpdateTrust.Bootstrap();
+            for (var count = 0; count < 64; count++)
+            {
+                var next = Path.Combine(args[1], $"{checked(releaseState.RootVersion + 1)}.root.json");
+                if (!File.Exists(next)) break;
+                releaseState = TufUpdateVerifier.RotateRoot(releaseState, ReadMetadata(next));
+                if (count == 63) throw new UpdateMetadataException("Root rotation limit reached.");
+            }
+            foreach (var edition in new[] { "bundled", "lite" })
+            {
+                var release = TufUpdateVerifier.Verify(releaseState, ReadMetadata(Path.Combine(args[1], "timestamp.json")),
+                    ReadMetadata(Path.Combine(args[1], "snapshot.json")), ReadMetadata(Path.Combine(args[1], "targets.json")),
+                    edition, args[3], true, DateTimeOffset.UtcNow);
+                if (release.Target.Tag != args[3]) throw new UpdateMetadataException("Signed release tag differs from requested tag.");
+                var path = Path.Combine(args[2], release.Target.Filename);
+                var actual = Installer(path, args[3]);
+                if (actual.Length != release.Target.Length || actual.Hash != release.Target.Sha256)
+                    throw new UpdateMetadataException("Installer differs from signed approval.");
+                Console.WriteLine($"Verified installer {release.Target.Filename}: {actual.Hash}");
+            }
+            break;
         default:
             throw new ArgumentException(Usage());
     }
@@ -218,6 +240,7 @@ static DateTimeOffset Expiry(string value) => DateTimeOffset.TryParseExact(value
     && parsed > DateTimeOffset.UtcNow ? parsed : throw new ArgumentException("Use a future UTC expiry: yyyy-MM-ddTHH:mm:ssZ.");
 
 static string Usage() => "Commands:\n"
+    + "  verify-release <public-metadata-directory> <installer-directory> <tag>\n"
     + "  verify-root <signed-root>\n"
     + "  keygen <outside-repository-directory> <role-name>\n"
     + "  root <public-key-directory> <version> <UTC-expiry> <output>\n"

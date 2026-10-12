@@ -118,9 +118,11 @@ public sealed class PinnedLocalPathTests
         try
         {
             Assert.Throws<IOException>(() => PinnedLocalPath.Directory(Path.Combine(junction, "child")));
+            Assert.Throws<IOException>(() => SafeFileTree.Delete(Path.Combine(junction, "child")));
             Assert.True(Directory.Exists(child));
         }
-        finally { Directory.Delete(junction); }
+        finally { SafeFileTree.Delete(junction); }
+        Assert.True(Directory.Exists(child));
     }
 
     [Fact]
@@ -143,6 +145,21 @@ public sealed class PinnedLocalPathTests
         Assert.Equal(before, new FileInfo(outside).GetAccessControl().GetSecurityDescriptorBinaryForm());
     }
 
+    [Fact]
+    public void RecursiveCleanupUnlinksHardLinksWithoutDeletingOutsideFile()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new TemporaryTree();
+        var data = Directory.CreateDirectory(Path.Combine(fixture.Root, "data")).FullName;
+        var nested = Directory.CreateDirectory(Path.Combine(data, "nested")).FullName;
+        var outside = Path.Combine(fixture.Root, "outside.txt");
+        File.WriteAllText(outside, "unchanged");
+        if (!CreateHardLink(Path.Combine(nested, "alias.txt"), outside, IntPtr.Zero)) throw new Win32Exception(Marshal.GetLastWin32Error());
+        SafeFileTree.Delete(data);
+        Assert.False(Directory.Exists(data));
+        Assert.Equal("unchanged", File.ReadAllText(outside));
+    }
+
     private sealed class TemporaryTree : IDisposable
     {
         internal string Root { get; } = Path.Combine(Path.GetTempPath(), "BeszelPinnedTest-" + Guid.NewGuid().ToString("N"));
@@ -156,6 +173,20 @@ public sealed class PinnedLocalPathTests
                 throw new IOException("Invalid temporary cleanup target.");
             Directory.Delete(full, recursive: true);
         }
+    }
+
+    [Fact]
+    public void SecurityPinCanCoexistWithWriterButReadBarrierCannot()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        using var fixture = new TemporaryTree();
+        var path = Path.Combine(fixture.Root, "active.log");
+        File.WriteAllText(path, "existing");
+        using var writer = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        using var security = PinnedLocalPath.ForSecurity(path);
+        Assert.NotNull(security.ReadSecurity().Owner);
+        Assert.Throws<Win32Exception>(() => PinnedLocalPath.File(path));
+        Assert.Throws<IOException>(() => File.Move(path, path + ".moved"));
     }
 
     [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]

@@ -17,6 +17,7 @@ internal sealed class ProtectedUpdateStore : IDisposable
     private readonly SemaphoreSlim _mutation = new(1, 1);
     private TufTrustState _state;
     internal TufTrustState State => _state;
+    internal string DirectoryPath => _directory.Path;
 
     internal ProtectedUpdateStore(string serviceDataDirectory)
     {

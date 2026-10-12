@@ -1,178 +1,166 @@
-# Signed manager updates — private implementation stage
+# Signed manager updates
 
-## Status and release gates
+## Implementation and release gates
 
-The metadata verifier, staged refresh coordinator and local signing tool are implemented. They are **not yet
-connected to a SYSTEM installer launch**. The GUI remains manual-update-only;
-the legacy `manager.installVersion` broker action returns error 58. The old
-checksum/any-valid-Authenticode launcher has been removed, not retained as a fallback.
+4.21.1 connects verification, protected checkpoints, official downloads, staging,
+a detached SYSTEM installer worker, and unelevated user-session relaunch. No
+stable release is published by this implementation. Installer/upgrade and
+positive SYSTEM tests require the [private VM checklist](update-test-checklist.md).
+Production metadata signing and limited renewal-key configuration remain operator
+steps; neither private keys nor passphrases belong in this repository.
 
-The refresh coordinator awaits a durable checkpoint after each verified role,
-before fetching the next role. Interrupted downloads retain accepted history;
-checkpoint failures abort the refresh. Its transport/storage callbacks are not
-yet connected to protected filesystem storage or a production refresh loop.
-`OfficialUpdateTransport` provides size/time-bounded HTTPS metadata downloads from
-the fixed repository, with manual allowlisted redirects, no credentials/cookies,
-and no transparent content decoding. The default endpoint is stable/latest;
-an exact validated tag supports a future prerelease lookup. Root filenames are
-positive versioned `N.root.json` names; the host still must authenticate rotation.
-`TufCheckpointCodec` binds accepted counters, hashes and clock history to the
-already-authenticated root. It does not authenticate its own storage: only a
-protected, durable service store may supply these bytes. Invalid state must
-pause updates, never silently bootstrap again or discard rollback history.
+Existing users need one manual bootstrap upgrade. Before approved signed assets
+exist on the official release, Update Manager deliberately refuses installation.
+Project updater signatures are not Authenticode or SmartScreen publisher trust.
 
-Windows host foundation: `PinnedLocalPath` retains local ancestor handles with
-read/list-directory access and without delete sharing. It rejects reparse
-points, hard-linked files, ambiguous/device/remote paths, untrusted storage
-owners and untrusted write ACLs. Manager user-data permissions are changed on
-the pinned root only, not recursively on user-controlled child files. Regression
-tests exercise ancestor renames, file replacement, junctions and child hard-link
-ACL preservation using disposable local fixtures.
+## Trust and execution
 
-`ProtectedUpdateStore` adds a fixed `secure-manager-updates` directory under
-already-protected ServiceData, SYSTEM-only initialization, bounded checkpoint
-reads, flushed atomic replacement, serialized mutations and authenticated root
-rotation history. A missing checkpoint in an existing store fails closed. This
-host is not yet connected to the background loop. Positive SYSTEM-owned storage,
-power-loss recovery and installer upgrade/uninstall cases require isolated VM
-testing. Existing recursive ServiceData initialization/cleanup and custom code
-roots remain separate release blockers; this foundation does not fix them all.
+- The protected application embeds signed public root version 1. No downloaded
+  initial root, user setting, pipe argument, or trust-on-first-use override.
+- Restricted TUF 1.0.31: P-256 ECDSA/SHA-256, DER signatures, OLPC canonical JSON;
+  no delegations or consistent snapshots. Duplicate JSON, malformed Unicode,
+  floats, excessive nesting and metadata over 256 KiB are rejected.
+- Root requires two distinct signatures, normally 2 of 3 offline keys. Targets,
+  snapshot and timestamp each have a separate authority. Root rotation is
+  consecutive and requires both the old and new thresholds.
+- Offline targets approve both exact Windows x64 installer names, tag, edition,
+  byte length and SHA-256. Snapshot binds targets; timestamp binds snapshot.
+  Online keys cannot authorize changed installer bytes.
+- Metadata freshness, counter/hash history, clock floor and installed-version
+  floor are checked. An interrupted refresh durably retains every accepted role
+  before requesting the next one. Missing/corrupt existing history fails closed.
+- The repository is hardcoded to MiranoVerhoef/BeszelAgentManager. Stable uses
+  latest; opt-in prereleases select the newest valid published version, including
+  natural RC ordering. Callers cannot choose a tag, URL, executable or command.
+- Downloads are bounded HTTPS requests, with at most three allowlisted redirects
+  and no token, cookies or transparent decoding. Installer size is capped at
+  512 MiB; the signed exact size and hash are mandatory.
+- Edition comes from protected Program Files RUNTIME_VARIANT, not editable
+  ProgramData or pipe arguments.
+- The UI requests prepare with no arguments; commit accepts only a staged
+  operation GUID for that authorized SID. The old manager.installVersion action
+  stays disabled. Older releases are an explicit manual-install flow.
 
-Before enabling automatic installation:
+ServiceData/secure-manager-updates is SYSTEM/Administrators-owned and writable
+only by those identities. Ancestor handles and the verified installer are pinned
+through use; reparse points, hard links and untrusted owners/write ACLs are
+rejected. Initial sealing and cleanup do not follow user-controlled redirects
+or recursively take ownership. Manager code is fixed under Program Files;
+custom installation directories are not accepted by this hardened installer.
 
-1. Complete the operator key ceremony and independently confirm the public root.
-2. Embed that exact public root in the protected application build. Never load
-   initial trust from downloaded metadata, user settings, or broker arguments.
-3. Secure installer code roots, initialization, repair, and uninstall filesystem
-   operations. Validate redirected ancestors, hard links and concurrent renames
-   on an isolated VM; metadata signatures do not fix filesystem vulnerabilities.
-4. Add bounded official-repository metadata fetching with authenticated,
-   consecutive root rotation; select the installed edition from protected state.
-5. Persist authenticated roots, counters, hashes and last verified time under
-   protected ServiceData. Persist each accepted role before subsequent network
-   work, including on partial refresh failure; do not reset history on upgrade.
-6. Pin staging directory and file identity; keep non-administrators unable to
-   replace the verified executable through download, verification and execution.
-7. Add a fixed-argument installer runner, unelevated relaunch, and post-install
-   edition/version/service checks. "Staged" is not "installed successfully".
-8. Exercise the tamper, replay, clock, key-rotation, interrupted-update and
-   Bundled/Lite matrix. Provide numbered installer tests and await approval.
+A copied, renamed helper worker survives replacement of the running service.
+Only the fixed installer, arguments, default install directory and protected log
+location are used. Commit means accepted, not installed. Completion requires
+installer exit 0, exact version/edition, protected GUI/helper executable versions,
+the expected LocalSystem SCM command, and a running background service.
 
-This stage is deliberately fail-closed. The operator generated production keys
-outside the repository and signed root version 1 with two root keys. The public
-root is embedded in Core and its signature threshold is covered by a build test.
-Private keys are not included. Transport, protected persistence and installer
-execution remain release gates; no release is published by this implementation.
+The worker relaunches only the captured session's authorized SID with its
+unelevated Windows token. If the session is gone, it records a relaunch error;
+it never starts a SYSTEM desktop UI. The next UI can read the persisted result.
+A committed operation without a terminal result is not automatically discarded:
+inspect the protected installer log and process state before operator recovery.
 
-## Protocol profile
+## Operator release approval
 
-TUF 1.0.31 top-level metadata: `root.json`, `targets.json`, `snapshot.json`,
-`timestamp.json`. Canonical signatures follow OLPC canonical JSON, P-256 ECDSA,
-SHA-256 and DER signature encoding. JSON rejects duplicate members, malformed
-Unicode, floating-point values, excessive nesting, and inputs over 256 KiB.
-
-This is a restricted profile, not a complete generic TUF client: no delegations,
-no consistent snapshots, only Windows x64 and the two exact installer filenames.
-Other profiles fail closed. Metadata versions are positive signed 64-bit
-integers. Hash and byte-length
-bindings are mandatory. Re-signing different bytes requires a new version.
-
-Root requires two independent signatures (normally 2 of 3 offline keys). Each
-other role uses its own distinct key. Identical public key material cannot be
-counted under aliases, or shared between roles. Rotation must be signed by both
-old and new root thresholds and increment the root version exactly once.
-
-The offline targets key approves BOTH editions, their exact hashes/sizes, the
-repository, tag, edition and architecture. Snapshot binds targets; timestamp
-binds snapshot. A timestamp key cannot approve another installer. New metadata
-cannot authorize an older manager. Clock rollback or expired metadata pauses
-updates; it never enables an unsigned/manual-trust fallback.
-
-Downloads are derived from the hardcoded official GitHub repository, verified
-tag and exact asset name. No caller-provided executable, URL, path or command.
-Keep prior versioned roots accessible to old clients; root rotation cannot skip
-intermediate trust. Freshness metadata must be renewed even between releases.
-
-An authenticated root rotation changing timestamp/snapshot authority clears
-their cached counters/hashes, allowing recovery from online-key fast-forward
-attacks. Root and target history remain protected. Normal upgrades and ordinary
-refreshes never reset counters. Increase role versions during normal operation.
-
-## Operator tool
-
-`tools/BeszelAgentManager.ReleaseSigning` is a local .NET 10 console tool. It is
-not packaged with Bundled or Lite. Passwords are entered interactively, not via
-arguments, environment variables or CI secrets. Keys use encrypted PKCS#8 with
-AES-256 and PBKDF2-SHA256 (600,000 iterations). Private key paths must be outside
-Git checkouts and cannot traverse reparse points. Outputs never overwrite files.
-
-Build:
+Build the local operator tool:
 
 ```powershell
 dotnet build tools/BeszelAgentManager.ReleaseSigning -c Release
 ```
 
-Run the built executable with these commands:
-
-```text
-keygen <outside-repository-directory> <role-name>
-verify-root <signed-root>
-root <public-key-directory> <root-counter> <UTC-expiry> <unsigned-output>
-targets <installer-directory> <release-tag> <targets-counter> <UTC-expiry> <unsigned-output>
-sign <input-envelope> <encrypted-private-key> <new-output>
-snapshot <signed-targets> <snapshot-counter> <UTC-expiry> <unsigned-output>
-timestamp <signed-snapshot> <timestamp-counter> <UTC-expiry> <unsigned-output>
-verify <pinned-root> <timestamp> <snapshot> <targets> <edition> <installed-tag>
-```
-
-Role names: `root-1`, `root-2`, `root-3`, `targets`, `snapshot`, `timestamp`.
-Expiries use `yyyy-MM-ddTHH:mm:ssZ`. Example lifetimes: root 3 years, targets
-90 days, snapshot 7 days, timestamp 1 day. Plan renewal and secure key backups;
-do not place every offline root/targets key on the release runner. The encrypted
-key files and passphrases still require separate backups and access controls.
-
-Initial ceremony: generate keys in a private operator-controlled location;
-collect public PEM files; create root metadata; sign it with two root keys;
-verify/review the role assignments and public-key fingerprints independently.
-Only public metadata belongs in the repository/build. Do not generate a root
-from unreviewed public key files supplied by a release workflow.
-
-For each release: review the exact build/commit, test both installers, generate
-targets, and sign targets locally. The tool checks each Inno numeric product
-version; the RC identity must also be confirmed against the build's channel.
-Then create/sign snapshot and create/sign timestamp IN THAT ORDER: signatures
-change file bytes, so parents must bind the final child envelopes. Verify the
-whole chain for BOTH editions and the actual installers before publishing.
-The `verify` command checks metadata only; the client stream verifier checks
-installer bytes. Operator approval must cover the exact artifacts, not just a
-version string. Keep release-signing keys outside GitHub.
-
-The release workflow prepares draft releases. Attach approved public metadata
-to the GitHub release, complete testing, then publish manually. No separate
-installer server is needed. Future freshness renewal automation must have only
-limited role keys, approved release bindings, and no targets/root signing rights.
-Implement and review that automation before relying on daily freshness renewal.
-
-Existing users need one manual bootstrap upgrade. These signatures authenticate
-our updater, not Windows publisher trust: SmartScreen behavior is unchanged.
-SignPath can later add Authenticode signing without removing metadata checks.
-
-## Local verification
-
-Core tests use disposable in-memory keys, never an operator key. Optional
-reference checks use Python ONLY for tests; it is not a runtime dependency:
+After both installers from the exact candidate commit pass testing:
 
 ```powershell
-$env:BESZEL_TUF_INTEROP_OUTPUT = Join-Path $PWD 'build/tuf-interop'
-dotnet test tests/BeszelAgentManager.Core.Tests -c Release
-Remove-Item Env:BESZEL_TUF_INTEROP_OUTPUT
-python -m venv .tools/tuf-reference
-.tools/tuf-reference/Scripts/python -m pip install tuf cryptography
-.tools/tuf-reference/Scripts/python tests/tuf_reference_check.py build/tuf-interop
-tools/BeszelAgentManager.ReleaseSigning/bin/Release/net10.0/BeszelAgentManager.ReleaseSigning.exe verify build/tuf-interop/reference/root.json build/tuf-interop/reference/timestamp.json build/tuf-interop/reference/snapshot.json build/tuf-interop/reference/targets.json bundled 4.0.10
+tools/Prepare-SignedRelease.ps1 -InstallerDirectory '<tested-installer-directory>'
 ```
 
-Reference checks verify .NET signatures/bindings with python-tuf, then verify
-independently generated Python signatures/bindings with .NET. Fixture outputs
-contain public metadata only, under ignored `build/`; private test keys remain
-in memory. Tests do not prove filesystem, installer, or production key security.
+The script reads VERSION/RELEASE_CHANNEL, creates targets, snapshot and timestamp,
+asks separately for the three role-key passwords, and verifies metadata plus both
+actual installer hashes/sizes and Inno product versions. It never needs offline
+root private keys. Default key directory is Desktop/BeszelReleaseKeys; specify
+-KeyDirectory after moving it to secure storage. Counter must exceed every
+previously published role counter. Outputs never overwrite existing metadata.
+
+Attach only signed targets.json, snapshot.json, timestamp.json, and versioned
+public roots (1.root.json and every subsequent authenticated root) alongside
+both installers. Do not upload private keys or unsigned intermediate files.
+Keep all consecutive roots available to older clients. Root rotations also
+require including their public chain in local verification inputs.
+
+Recommended expiries: root 3 years, targets 90 days, snapshot 7 days, timestamp
+1 day. Sign child metadata before creating/signing its parent, because parents
+bind exact final envelope bytes. Publish snapshot before timestamp. A temporary
+mismatch fails closed until a consistent set is available.
+
+The operator tool accepts interactive passwords only, never command arguments
+or environment values. Private keys use encrypted PKCS#8, AES-256-CBC and
+PBKDF2-HMAC-SHA256 with 600,000 iterations. Keep encrypted keys and passwords
+access-controlled and backed up separately; encryption is not permission to
+leave keys exposed. Private-key paths cannot be inside Git or traverse reparse
+points. The implementation never reads an operator's private keys unattended.
+
+Useful commands:
+
+```text
+verify-root <signed-root>
+verify-release <public-metadata-directory> <installer-directory> <tag>
+keygen <outside-repository-directory> <role-name>
+root <public-key-directory> <counter> <UTC-expiry> <output>
+targets <installer-directory> <tag> <counter> <UTC-expiry> <output>
+sign <input-envelope> <encrypted-private-key> <new-output>
+snapshot <signed-targets> <counter> <UTC-expiry> <output>
+timestamp <signed-snapshot> <counter> <UTC-expiry> <output>
+```
+
+## Limited online freshness renewal
+
+The separate FreshnessSigning tool and renew-update-metadata workflow renew
+only snapshot and timestamp, twice daily for the latest stable official release.
+This does not replace offline installer approval. Unexpired root-authorized
+targets must already approve that release. Authenticated previous online
+counters determine strictly increasing versions; unsigned/corrupt counters
+and expired targets stop renewal.
+
+Configure the GitHub environment update-freshness on the official repository,
+restricted to main, with these four environment secrets:
+
+- BESZEL_SNAPSHOT_PRIVATE_PK8_BASE64
+- BESZEL_SNAPSHOT_PASSPHRASE
+- BESZEL_TIMESTAMP_PRIVATE_PK8_BASE64
+- BESZEL_TIMESTAMP_PASSPHRASE
+
+Only the two limited role keys go there. NEVER upload root or targets private
+keys. Secret installation is a separate operator action, not performed by this
+implementation. With no secrets, renewal refuses to sign. Scheduled workflows
+may be delayed or disabled by GitHub; monitor failed renewal runs and metadata
+expiry. RC metadata is deliberately not automatically renewed and must be
+renewed manually for continued prerelease testing.
+
+The online tool verifies pinned trust and consecutive public roots, targets,
+release identity and key-to-role assignment before signing. It changes no
+targets or installer bytes, checks the complete result for both editions, and
+uploads snapshot first, timestamp last. A latest-release change aborts upload.
+Targets need offline reapproval before their 90-day expiry even if installers
+have not changed. The build workflow itself receives no signing secrets; PR
+builds have read-only repository permissions. A separate trusted-main job only
+prepares a draft release.
+
+Limited-key theft can freeze updates or fast-forward online counters, but cannot
+approve another executable. An offline-threshold root rotation changing the
+online authorities resets only their accepted counters for recovery; target
+history, installed-version floor and clock floor remain. Never erase client
+checkpoints to bypass an error. Keep embedded root 1 as the initial anchor across
+normal upgrades; changing that anchor requires an explicitly reviewed migration.
+
+## Verification limits
+
+Unit tests use disposable keys and filesystem fixtures, never production private
+keys. They exercise signature/expiry/tamper/replay, transport limits, edition
+binding, root rotation, checkpoint interruption and redirect-safe cleanup.
+Two storage integration tests intentionally require a LocalSystem isolated VM.
+Build success and these tests do not prove installer upgrade/uninstall behavior,
+WTS relaunch on every account type, power-loss handling or a whole-program absence
+of vulnerabilities.
+
+Optional python-tuf interoperability checks remain in
+tests/tuf_reference_check.py; Python is only a test dependency.

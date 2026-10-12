@@ -139,6 +139,40 @@ public static class TufUpdateVerifier
 
     public static bool IsValidTag(string value) => value.Length <= 40 && TagPattern.IsMatch(value);
 
+    // Publisher-only renewal helpers. These do NOT approve downloads or reset
+    // client histories. An expired online envelope supplies only an authenticated
+    // counter; fresh offline targets remain mandatory.
+    public static string ValidateRenewalTargets(TufTrustState state, ReadOnlyMemory<byte> bytes, DateTimeOffset now)
+    {
+        CheckFreshness(state.Root, now);
+        var targets = ReadRole(bytes, state.Root, "targets", now);
+        var signed = Signed(targets);
+        Require(!signed.TryGetProperty("delegations", out _), "Delegations are not supported.");
+        var entries = Object(signed, "targets");
+        Require(entries.EnumerateObject().Count() == 2, "Both fixed installer editions are required.");
+        var bundled = ReadTarget(entries, "bundled");
+        var lite = ReadTarget(entries, "lite");
+        Require(bundled.Tag == lite.Tag, "Installer editions disagree about release identity.");
+        return bundled.Tag;
+    }
+
+    public static long ReadRenewalCounter(TufTrustState state, ReadOnlyMemory<byte> bytes, string role)
+    {
+        Require(role is "snapshot" or "timestamp", "Only online roles may be renewed.");
+        var document = TufJson.Parse(bytes);
+        Header(document, role);
+        VerifySignatures(document, state.Root, role);
+        return Version(document);
+    }
+
+    public static bool IsAuthorizedRenewalKey(TufTrustState state, string role, ECDsa key)
+    {
+        Require(role is "snapshot" or "timestamp", "Only online roles may be renewed.");
+        var id = KeyId(PublicKey(key));
+        return Object(Object(Signed(state.Root), "roles"), role).GetProperty("keyids")
+            .EnumerateArray().Any(element => element.GetString() == id);
+    }
+
     public static JsonElement PublicKey(ECDsa key) => JsonSerializer.SerializeToElement(new
     {
         keytype = "ecdsa", scheme = "ecdsa-sha2-nistp256",

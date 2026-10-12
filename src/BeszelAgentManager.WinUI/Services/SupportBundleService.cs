@@ -24,11 +24,8 @@ internal sealed partial class SupportBundleService
             await CopyRedactedAsync(ManagerPaths.AgentLogPath, Path.Combine(tempDir, "beszel-agent.log"), cancellationToken);
             await WriteCommandAsync(Path.Combine(tempDir, "service-diagnostics.txt"), "sc.exe", ["queryex", "Beszel Agent"], cancellationToken);
             await WriteCommandAsync(Path.Combine(tempDir, "service-config.txt"), "sc.exe", ["qc", "Beszel Agent"], cancellationToken);
-            await WriteCommandAsync(
-                Path.Combine(tempDir, "scheduled-tasks.txt"),
-                "schtasks.exe",
-                ["/Query", "/FO", "LIST", "/V"],
-                cancellationToken);
+            await File.WriteAllTextAsync(Path.Combine(tempDir, "scheduled-tasks.txt"),
+                "Schedules are owned by the background service. Unrelated Windows tasks are not collected.", cancellationToken);
             await WriteSystemDetailsAsync(Path.Combine(tempDir, "system-details.txt"), cancellationToken);
             ZipFile.CreateFromDirectory(tempDir, outputPath, CompressionLevel.Optimal, false);
             return outputPath;
@@ -75,7 +72,7 @@ internal sealed partial class SupportBundleService
             {
                 foreach (var item in customVariables.OfType<JsonObject>())
                 {
-                    if (string.Equals(item["name"]?.GetValue<string>(), "ALL_PROXY", StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(item["name"]?.GetValue<string>()?.Trim(), "ALL_PROXY", StringComparison.OrdinalIgnoreCase))
                     {
                         item["value"] = "***redacted***";
                     }

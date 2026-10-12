@@ -43,6 +43,9 @@ internal static class AppInfo
     {
         try
         {
+            var protectedMarker = Path.Combine(AppContext.BaseDirectory, "RUNTIME_VARIANT");
+            if (File.Exists(protectedMarker))
+                return File.ReadAllText(protectedMarker).Trim() == "lite" ? "lite" : "bundled";
             var variantPath = Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
                 ProjectName,

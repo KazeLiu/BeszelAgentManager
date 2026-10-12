@@ -6,7 +6,7 @@ Version 4 is a native .NET 10 and WinUI 3 application. Routine administrative ac
 
 ## Features
 
-- Install, update, roll back, force-reinstall, or uninstall the Beszel agent.
+- Install, update, select supported versions, force-reinstall, or uninstall the Beszel agent. Privileged downgrades are blocked.
 - Configure `KEY`, `TOKEN`, `HUB_URL`, `LISTEN`, and Beszel v0.21 advanced environment variables, including `SKIP_WIFI`, `DOCKER_IMAGE_CHECK`, `SKIP_SYSTEMD_LOGS`, and `PACKAGE_UPDATES_INTERVAL`.
 - Windows Wi-Fi signal collection uses the agent's native WLAN support. Linux-only environment options are labelled in the picker; boolean overrides use literal `true` and `false`.
 - Start, stop, and restart the agent from the UI or tray.
@@ -16,7 +16,8 @@ Version 4 is a native .NET 10 and WinUI 3 application. Routine administrative ac
 - Schedule automatic agent updates, periodic restarts, and daily log rotation in the background service.
 - View manager and agent logs, rotate logs, and create a redacted support bundle.
 - View or reset the agent service's fingerprint through the secured background broker.
-- Browse manager releases and open the exact official installer page for manual installation.
+- Install the latest approved manager release through signed metadata verification, with edition-preserving updates and unelevated reopening.
+- Browse older manager releases for explicit manual installation.
 - Optional manager-update notifications, prerelease checks, skipped versions, and tray status.
 - Optional Windows Defender exclusion with explicit consent.
 - Third-party antivirus allowlist instructions covering application, data, and process paths.
@@ -102,7 +103,9 @@ Last-run and next-due state is persisted in the protected service-data directory
 
 Agent assets are selected only from the official Beszel GitHub repository. Every install, upgrade, and scheduled update downloads the release's versioned checksum file and verifies `beszel-agent_windows_amd64.zip` with SHA-256 before extraction. Missing or mismatched checksums are rejected. Broker-driven downgrades are blocked.
 
-Manager update checks use only the hardcoded project repository. Standard installations select the standard installer and Lite installations select the Lite installer. Because releases are currently unsigned, Update Manager opens the exact official GitHub release page and requires the user to run the installer with normal Windows administrator approval. Silent broker installation accepts only signed installers and never downgrades the installed manager.
+Manager update checks use only the hardcoded project repository. Bundled installations select the standard installer; Lite installations select the Lite installer from a protected installation marker. The background service verifies project-signed TUF metadata, installer hash/size, freshness, and persistent rollback history before launching a fixed installer command. Missing, expired, or invalid metadata stops installation; there is no unsigned fallback. Success requires post-install version, edition, and service verification.
+
+Existing installations need a manual bootstrap upgrade to this trust-enabled build. Windows publisher signing and SmartScreen reputation are separate from these updater signatures. See [signed update operation](docs/signed-updates.md) for release approval, limited-key freshness renewal, and recovery.
 
 ## Uninstall behavior
 

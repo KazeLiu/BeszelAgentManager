@@ -13,6 +13,8 @@ public sealed class SecureVersionPolicyTests
     [InlineData("4.0.10", "4.0.10-rc1", true)]
     [InlineData("4.0.10-rc2", "4.0.10-rc1", true)]
     [InlineData("4.0.10-rc1", "4.0.10-rc2", false)]
+    [InlineData("4.21.1-rc10", "4.21.1-rc9", true)]
+    [InlineData("4.21.1-rc9", "4.21.1-rc10", false)]
     [InlineData("4.0.10", "4.0.10.0", true)]
     [InlineData("4.0.9", "4.0.10", false)]
     [InlineData("0.18.8", "0.18.8", true)]
