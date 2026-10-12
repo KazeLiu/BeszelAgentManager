@@ -1,0 +1,54 @@
+name: Verify and publish signed release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tested draft tag with uploaded signed metadata
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-release-publication
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'MiranoVerhoef/BeszelAgentManager' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Verify exact draft installers and signed metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ./tools/Publish-VerifiedRelease.ps1 -Tag $env:RELEASE_TAG
+  publish:
+    needs: verify
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Reverify current draft and publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: ./tools/Publish-VerifiedRelease.ps1 -Tag $env:RELEASE_TAG -Publish
