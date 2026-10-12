@@ -25,6 +25,8 @@ AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}{#RuntimeVariantSuffix}
 AppPublisher=Verhoef
 DefaultDirName={autopf}\{#AppName}
+DisableDirPage=yes
+UsePreviousAppDir=no
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 OutputDir={#InstallerOutputDir}
@@ -50,6 +52,7 @@ VersionInfoVersion={#AppVersion}.0
 
 [Files]
 Source: "{#DistDir}\INSTALL-MANIFEST.sha256"; Flags: dontcopy
+Source: "{#DistDir}\helper\*"; DestDir: "{tmp}\bam-security"; Flags: dontcopy recursesubdirs createallsubdirs
 Source: "{#DistDir}\*"; DestDir: "{app}\app"; Excludes: "nssm.exe,*.pdb,INSTALL-MANIFEST.sha256"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: ShouldInstallApplicationFile
 Source: "{#DistDir}\INSTALL-MANIFEST.sha256"; DestDir: "{app}\app"; Flags: ignoreversion
 Source: "{#DistDir}\nssm.exe"; DestDir: "{autopf}\Beszel-Agent"; Flags: ignoreversion onlyifdoesntexist
@@ -89,6 +92,24 @@ var
   InstallManifestLoaded: Boolean;
   InstallManifest: TArrayOfString;
   PreviousInstallManifest: TArrayOfString;
+
+function GetFileAttributesW(FileName: String): Cardinal;
+  external 'GetFileAttributesW@kernel32.dll stdcall';
+
+procedure RequireLocalNonReparsePath(Path: String);
+var
+  Current: String;
+  Attributes: Cardinal;
+begin
+  Current := RemoveBackslashUnlessRoot(Path);
+  while Length(Current) > 3 do
+  begin
+    Attributes := GetFileAttributesW(Current);
+    if (Attributes <> $FFFFFFFF) and ((Attributes and $400) <> 0) then
+      RaiseException('Installation cannot use a redirected directory: ' + Current);
+    Current := ExtractFileDir(Current);
+  end;
+end;
 
 function NormalizeManifestPath(Value: String): String;
 begin
@@ -484,7 +505,7 @@ begin
     VerifyInstalledManifest();
     VerifyInstalledApplication();
     if not SaveStringToFile(
-      ExpandConstant('{commonappdata}\{#AppName}\manager-runtime-variant.txt'),
+      ExpandConstant('{app}\app\RUNTIME_VARIANT'),
       '{#RuntimeVariantId}' + #13#10,
       False) then
       RaiseException('Could not save the manager runtime variant.');
@@ -500,6 +521,8 @@ begin
 
     if ResultCode = 5 then
     begin
+      if WizardSilent then
+        RaiseException('Background-service security setup failed. Open the manager Extra page to repair it.');
       Log('Background-service setup returned recoverable exit code 5. The manager will remain installed for repair from the Extra page.');
       if not WizardSilent then
         MsgBox(
@@ -531,6 +554,33 @@ var
   ManifestPath: String;
 begin
   Result := '';
+  if CompareText(RemoveBackslashUnlessRoot(ExpandConstant('{app}')),
+    RemoveBackslashUnlessRoot(ExpandConstant('{autopf}\{#AppName}'))) <> 0 then
+  begin
+    Result := 'BeszelAgentManager must be installed in its protected Program Files directory.';
+    Exit;
+  end;
+  try
+    RequireLocalNonReparsePath(ExpandConstant('{app}'));
+    RequireLocalNonReparsePath(ExpandConstant('{app}\app\helper'));
+    RequireLocalNonReparsePath(ExpandConstant('{autopf}\Beszel-Agent'));
+    RequireLocalNonReparsePath(ExpandConstant('{commonappdata}\{#AppName}.ServiceData'));
+  except
+    Result := GetExceptionMessage();
+    Exit;
+  end;
+  try
+    ExtractTemporaryFiles('{tmp}\bam-security\*');
+    if not Exec(ExpandConstant('{tmp}\bam-security\BeszelAgentManager.Helper.exe'),
+      '--secure-installation-root', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) or (ResultCode <> 0) then
+    begin
+      Result := 'The installation folders could not be secured. Redirected paths, hard links or untrusted ownership need administrator review before continuing.';
+      Exit;
+    end;
+  except
+    Result := 'Installation security preflight failed: ' + GetExceptionMessage();
+    Exit;
+  end;
   try
     ExtractTemporaryFile('INSTALL-MANIFEST.sha256');
     ManifestPath := ExpandConstant('{tmp}\INSTALL-MANIFEST.sha256');
@@ -567,7 +617,7 @@ begin
   );
   Exec(
     ExpandConstant('{cmd}'),
-    '/C taskkill /IM "BeszelAgentManager.Helper.exe" /T /F',
+    '/C taskkill /IM "BeszelAgentManager.Helper.exe" /F',
     '',
     SW_HIDE,
     ewWaitUntilTerminated,

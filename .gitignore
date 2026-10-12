@@ -29,6 +29,10 @@ installer-dist/
 winui-debug-dist/
 winui-*-dist/
 .tools/
+# Release signing keys must never be committed, even outside the usual tool paths.
+*.private.pk8
+*.pfx
+*.p12
 BeszelAgentManager-WinUI-debug.zip
 bin/
 obj/

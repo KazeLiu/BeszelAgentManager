@@ -46,6 +46,9 @@ public static class SecureVersionPolicy
 
     private static int ComparePrerelease(string candidate, string installed)
     {
+        if (candidate.StartsWith("rc", StringComparison.Ordinal) && installed.StartsWith("rc", StringComparison.Ordinal)
+            && int.TryParse(candidate.AsSpan(2), out var candidateRc) && int.TryParse(installed.AsSpan(2), out var installedRc))
+            return candidateRc.CompareTo(installedRc);
         var candidateParts = candidate.Split('.');
         var installedParts = installed.Split('.');
         for (var index = 0; index < Math.Max(candidateParts.Length, installedParts.Length); index++)

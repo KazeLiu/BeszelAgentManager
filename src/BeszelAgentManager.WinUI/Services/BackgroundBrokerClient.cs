@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Win32;
 using BeszelAgentManager.Core;
+using BeszelAgentManager.Core.Updates;
 
 namespace BeszelAgentManager.WinUI.Services;
 
@@ -71,13 +72,26 @@ internal sealed class BackgroundBrokerClient
     public Task<int> SetDefenderExclusionAsync(bool enabled) =>
         SendAsync("defender.set", new Dictionary<string, string> { ["enabled"] = enabled.ToString() });
 
-    public Task<int> InstallManagerVersionAsync(string tag, string relaunchToken) =>
-        SendAsync("manager.installVersion", new Dictionary<string, string>
-        {
-            ["tag"] = tag,
-            ["variant"] = AppInfo.RuntimeVariant,
-            ["relaunchToken"] = relaunchToken,
-        });
+    public async Task<ManagerUpdateStage> PrepareManagerUpdateAsync()
+    {
+        var response = await SendResponseAsync("manager.update.prepare");
+        if (!response.Success) throw new InvalidOperationException(response.Message);
+        return JsonSerializer.Deserialize(response.Message, AppJsonContext.Default.ManagerUpdateStage)
+            ?? throw new InvalidOperationException("Invalid signed update response.");
+    }
+
+    public async Task CommitManagerUpdateAsync(string operationId)
+    {
+        var response = await SendResponseAsync("manager.update.commit", new Dictionary<string, string> { ["operationId"] = operationId });
+        if (!response.Success || response.State != "accepted" || response.Message != "accepted") throw new InvalidOperationException(response.Message);
+    }
+
+    public async Task<string> GetManagerUpdateResultAsync()
+    {
+        var response = await SendResponseAsync("manager.update.result");
+        if (!response.Success) throw new InvalidOperationException(response.Message);
+        return response.Message;
+    }
 
     public async Task<string?> GetAgentVersionAsync()
     {

@@ -13,16 +13,13 @@ using System.ServiceProcess;
 using System.Text.Json;
 using System.Text;
 using BeszelAgentManager.Core;
+using BeszelAgentManager.Helper.Updates;
 using Microsoft.Win32;
 
 const string serviceName = "Beszel Agent";
 const string legacyServiceName = "BeszelAgentManager";
 const string agentRepo = "henrygd/beszel";
-const string managerRepo = "MiranoVerhoef/BeszelAgentManager";
 const string agentZipName = "beszel-agent_windows_amd64.zip";
-const string managerBundledInstallerName = "BeszelAgentManagerSetup.exe";
-const string managerLiteInstallerName = "BeszelAgentManagerSetup-Lite.exe";
-const string managerChecksumName = "SHA256SUMS.txt";
 const string firewallRuleName = "Beszel Agent";
 const string updateTaskName = "BeszelAgentManagerUpdate";
 const string agentLogRotateTaskName = "BeszelAgentManagerAgentLogRotate";
@@ -37,6 +34,24 @@ const int brokerProtocolVersion = 1;
 const string autoUpdateStampName = "last-auto-update-agent.txt";
 const int ServiceAlreadyRunning = 1056;
 const int ServiceNotRunning = 1062;
+
+if (args.Length == 1 && args[0] == "--secure-installation-root")
+{
+    try
+    {
+        EnableRestorePrivilege();
+        SafeSecurityTree.Ensure(InstalledManagerIdentity.Root, "S-1-5-11", setOwner: true);
+        SafeSecurityTree.Ensure(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "Beszel-Agent"), "S-1-5-11", setOwner: true);
+        return 0;
+    }
+    catch { return 59; }
+}
+
+if (args.Length == 2 && args[0] == "--complete-manager-update")
+{
+    try { return await SignedManagerUpdateHost.CompleteAsync(args[1]); }
+    catch { return 58; }
+}
 
 if (args.Length == 1 && string.Equals(args[0], "--auto-update-agent", StringComparison.OrdinalIgnoreCase))
 {
@@ -168,6 +183,7 @@ static string? FindNssmPath()
 
 static async Task<int> InstallOrUpdateBackgroundServiceAsync()
 {
+    InstalledManagerIdentity.RequireInstalledHelper();
     var policyResult = EnsureBrokerPolicy();
     if (policyResult != 0)
     {
@@ -350,6 +366,7 @@ static void CleanupManagerDataForUninstall(bool removeAgentLogs)
     var dataDirectory = Path.Combine(ProgramDataPath(), "BeszelAgentManager");
     if (Directory.Exists(dataDirectory))
     {
+        using var userDataPin = PinnedLocalPath.Directory(dataDirectory);
         foreach (var name in new[] { "manager_logs", "support_bundles", "updates", "manager-update", "tmp_agent" })
         {
             DeleteUserDirectoryWithoutFollowingReparsePoints(Path.Combine(dataDirectory, name));
@@ -361,7 +378,7 @@ static void CleanupManagerDataForUninstall(bool removeAgentLogs)
 
         foreach (var file in Directory.EnumerateFiles(dataDirectory))
         {
-            File.Delete(file);
+            SafeFileTree.Delete(file);
         }
     }
 
@@ -386,7 +403,7 @@ static void CleanupManagerDataForUninstall(bool removeAgentLogs)
                 }
                 else
                 {
-                    File.Delete(entry);
+                    SafeFileTree.Delete(entry);
                 }
             }
         }
@@ -395,13 +412,7 @@ static void CleanupManagerDataForUninstall(bool removeAgentLogs)
 
 static void DeletePrivilegedDirectory(string path)
 {
-    if (!Directory.Exists(path))
-    {
-        return;
-    }
-
-    ResetPrivilegedWorkingDirectory(path);
-    Directory.Delete(path);
+    SafeFileTree.Delete(path);
 }
 
 static int RunBackgroundWindowsService()
@@ -412,6 +423,8 @@ static int RunBackgroundWindowsService()
 
 static async Task RunBackgroundLoopAsync(CancellationToken cancellationToken)
 {
+    EnableRestorePrivilege();
+    InstalledManagerIdentity.RequireInstalledHelper();
     CompleteBrokerOwnerHardeningIfPending();
     var policy = LoadBrokerPolicy()
         ?? throw new InvalidOperationException("The background-service broker policy is unavailable.");
@@ -716,7 +729,7 @@ static async Task RunBrokerServerAsync(CancellationToken cancellationToken)
             pipe = NamedPipeServerStreamAcl.Create(
                 brokerPipeName,
                 PipeDirection.InOut,
-                NamedPipeServerStream.MaxAllowedServerInstances,
+                16,
                 PipeTransmissionMode.Byte,
                 options,
                 0,
@@ -799,6 +812,7 @@ static async Task HandleBrokerConnectionAsync(
             request = JsonSerializer.Deserialize<BrokerRequest>(payload);
             if (request is null
                 || request.ProtocolVersion != brokerProtocolVersion
+                || string.IsNullOrWhiteSpace(request.Action) || request.Action.Length > 80
                 || string.IsNullOrWhiteSpace(request.RequestId)
                 || request.RequestId.Length > 80)
             {
@@ -845,6 +859,35 @@ static async Task HandleBrokerConnectionAsync(
             await BrokerRuntime.MutationGate.WaitAsync(cancellationToken);
             try
             {
+                if (request.Action is "manager.update.prepare" or "manager.update.commit" or "manager.update.result")
+                {
+                    BrokerResponse updateResponse;
+                    if (request.Action == "manager.update.prepare" && request.Arguments is not { Count: > 0 })
+                    {
+                        if (!UpdateClientNative.GetNamedPipeClientProcessId(pipe.SafePipeHandle, out var clientPid))
+                            throw new Win32Exception(Marshal.GetLastWin32Error());
+                        using var client = Process.GetProcessById(checked((int)clientPid));
+                        var config = await LoadConfigurationAsync();
+                        using (config)
+                        {
+                            var prereleases = config is not null && config.RootElement.TryGetProperty("manager_update_include_prereleases", out var include)
+                                && include.ValueKind == JsonValueKind.True;
+                            var stage = await SignedManagerUpdateHost.PrepareAsync(authorizedSid, client.SessionId, prereleases, cancellationToken);
+                            updateResponse = BrokerResponse.Completed(request.RequestId, JsonSerializer.Serialize(stage));
+                        }
+                    }
+                    else if (request.Action == "manager.update.commit" && request.Arguments is { Count: 1 }
+                        && request.Arguments.TryGetValue("operationId", out var operationId))
+                    {
+                        SignedManagerUpdateHost.Commit(operationId, authorizedSid);
+                        updateResponse = BrokerResponse.Accepted(request.RequestId);
+                    }
+                    else if (request.Action == "manager.update.result" && request.Arguments is not { Count: > 0 })
+                        updateResponse = BrokerResponse.Completed(request.RequestId, SignedManagerUpdateHost.ReadLastResult());
+                    else updateResponse = BrokerResponse.Failed(request.RequestId, 2, "Unexpected manager-update arguments.");
+                    await WriteBrokerResponseAsync(pipe, updateResponse);
+                    return;
+                }
                 if (request.Action == "agent.fingerprint.view")
                 {
                     if (request.Arguments is { Count: > 0 })
@@ -865,7 +908,9 @@ static async Task HandleBrokerConnectionAsync(
                 var exitCode = await ExecuteBrokerActionAsync(request);
                 var response = exitCode == 0
                     ? BrokerResponse.Completed(request.RequestId)
-                    : BrokerResponse.Failed(request.RequestId, exitCode, "The privileged action failed.");
+                    : BrokerResponse.Failed(request.RequestId, exitCode, exitCode == 58
+                        ? "Signed manager updates are not configured. Install the official release manually."
+                        : "The privileged action failed.");
                 await WriteBrokerResponseAsync(pipe, response);
             }
             finally
@@ -880,7 +925,11 @@ static async Task HandleBrokerConnectionAsync(
             {
                 await WriteBrokerResponseAsync(
                     pipe,
-                    BrokerResponse.Failed(request?.RequestId ?? string.Empty, 1, "The privileged broker failed."));
+                    BrokerResponse.Failed(request?.RequestId ?? string.Empty,
+                        request?.Action?.StartsWith("manager.update.", StringComparison.Ordinal) == true ? 58 : 1,
+                        request?.Action?.StartsWith("manager.update.", StringComparison.Ordinal) == true
+                            ? $"Signed update verification failed: {ex.Message} No unsigned installer was started."
+                            : "The privileged broker failed."));
             }
         }
     }
@@ -930,21 +979,18 @@ static async Task<int> ExecuteBrokerActionAsync(BrokerRequest request)
         "agent.fingerprint.reset" => await ResetAgentFingerprintAsync(),
         "agent.fingerprint.import" when TryReadFingerprint(arguments, out var fingerprint) => await ImportAgentFingerprintAsync(fingerprint),
         "defender.set" when TryReadBoolean(arguments, "enabled", out var enabled) => await SetDefenderExclusionAsync(enabled),
-        "manager.installVersion" when TryReadManagerTag(arguments, out var tag)
-            && TryReadManagerVariant(arguments, out var variant)
-            && TryReadRelaunchToken(arguments, out var relaunchToken) => await InstallManagerVersionAsync(tag, variant, relaunchToken),
+        // Caller-selected tags/editions and legacy unsigned launchers remain disabled.
+        "manager.installVersion" => 58,
         _ => 2,
     };
 }
 
 static async Task WriteBrokerResponseAsync(NamedPipeServerStream pipe, BrokerResponse response)
 {
-    await using var writer = new StreamWriter(
-        pipe,
-        new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
-        leaveOpen: true)
-    { AutoFlush = true };
-    await writer.WriteLineAsync(JsonSerializer.Serialize(response));
+    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+    var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(response) + "\n");
+    if (bytes.Length > 64 * 1024) throw new IOException("Broker response size limit exceeded.");
+    await pipe.WriteAsync(bytes, timeout.Token);
 }
 
 static string? GetConnectedClientSid(NamedPipeServerStream pipe)
@@ -1382,21 +1428,19 @@ static async Task<JsonDocument?> LoadConfigurationAsync()
         return null;
     }
 
-    var file = new FileInfo(configPath);
-    if (file.Length > 256 * 1024)
+    using var pinned = PinnedLocalPath.File(configPath);
+    await using var stream = new FileStream(pinned.Handle, FileAccess.Read);
+    using var buffer = new MemoryStream();
+    var chunk = new byte[8192];
+    while (true)
     {
-        WriteBackgroundLog("WARN", "Configuration rejected because it exceeds 256 KiB.");
-        return null;
+        var read = await stream.ReadAsync(chunk);
+        if (read == 0) break;
+        if (buffer.Length + read > 256 * 1024) throw new IOException("Configuration exceeds 256 KiB.");
+        buffer.Write(chunk, 0, read);
     }
-
-    await using var stream = new FileStream(
-        configPath,
-        FileMode.Open,
-        FileAccess.Read,
-        FileShare.ReadWrite | FileShare.Delete,
-        bufferSize: 16 * 1024,
-        useAsync: true);
-    var document = await JsonDocument.ParseAsync(stream);
+    var parsed = BeszelAgentManager.Core.Updates.TufJson.Parse(buffer.ToArray());
+    var document = JsonDocument.Parse(parsed.GetRawText());
     var validation = PrivilegedConfigurationValidator.Validate(document.RootElement);
     if (!validation.Success)
     {
@@ -1409,28 +1453,7 @@ static async Task<JsonDocument?> LoadConfigurationAsync()
 
 static void DeleteUserDirectoryWithoutFollowingReparsePoints(string path)
 {
-    if (!Directory.Exists(path))
-    {
-        return;
-    }
-    if (File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
-    {
-        Directory.Delete(path);
-        return;
-    }
-    foreach (var entry in Directory.EnumerateFileSystemEntries(path))
-    {
-        var attributes = File.GetAttributes(entry);
-        if (attributes.HasFlag(FileAttributes.Directory))
-        {
-            DeleteUserDirectoryWithoutFollowingReparsePoints(entry);
-        }
-        else
-        {
-            File.Delete(entry);
-        }
-    }
-    Directory.Delete(path);
+    SafeFileTree.Delete(path);
 }
 
 static string ProgramDataPath()
@@ -1504,7 +1527,6 @@ static int EnsureBrokerPolicyCore(bool setProtectedOwner)
             $"The current Windows identity is not a supported user account. Account={currentIdentity.Name}; SID={currentSid ?? "<none>"}.");
     }
 
-    Directory.CreateDirectory(dataDirectory);
     EnsureServiceDataSecurity(dataDirectory, authorizedSid!, setProtectedOwner);
     File.WriteAllText(
         path,
@@ -1535,7 +1557,8 @@ static void ApplyBrokerPolicyFileSecurity(string path, string authorizedSid, boo
         new SecurityIdentifier(authorizedSid),
         FileSystemRights.Read,
         AccessControlType.Allow));
-    new FileInfo(path).SetAccessControl(security);
+    using var pinned = PinnedLocalPath.File(path, writable: true);
+    pinned.SetFileSecurity(security, setProtectedOwner);
 }
 
 static string OwnerHardeningMarkerPath()
@@ -1616,9 +1639,12 @@ static void ApplyManagerDataSecurity(string dataDirectory, string authorizedSid,
     var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
     var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
 
-    SecureTree(dataDirectory);
+    // User-controlled children may be hard links or concurrently replaced.
+    // Set inheritance on the pinned directory itself; never rewrite child ACLs.
+    using var pinned = PinnedLocalPath.Directory(dataDirectory, writable: true);
+    ApplyDirectory();
 
-    void ApplyDirectory(string directory)
+    void ApplyDirectory()
     {
         var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
         var directorySecurity = new DirectorySecurity();
@@ -1630,37 +1656,7 @@ static void ApplyManagerDataSecurity(string dataDirectory, string authorizedSid,
         directorySecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
         directorySecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
         directorySecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Modify, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        new DirectoryInfo(directory).SetAccessControl(directorySecurity);
-    }
-
-    void SecureTree(string directory)
-    {
-        ApplyDirectory(directory);
-        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
-        {
-            var attributes = File.GetAttributes(entry);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new IOException($"Refusing to secure reparse point in manager data: {entry}");
-            }
-
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                SecureTree(entry);
-                continue;
-            }
-
-            var fileSecurity = new FileSecurity();
-            fileSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            if (setProtectedOwner)
-            {
-                fileSecurity.SetOwner(administrators);
-            }
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Modify, AccessControlType.Allow));
-            new FileInfo(entry).SetAccessControl(fileSecurity);
-        }
+        pinned.SetDirectorySecurity(directorySecurity, setProtectedOwner);
     }
 }
 
@@ -1672,119 +1668,16 @@ static BrokerPolicy? LoadLegacyBrokerPolicy()
 
 static void EnsureServiceDataSecurity(string directory, string authorizedSid, bool setProtectedOwner)
 {
-    var fullPath = Path.GetFullPath(directory);
-    var expected = Path.GetFullPath(ServiceDataPath());
-    if (!string.Equals(fullPath, expected, StringComparison.OrdinalIgnoreCase))
-    {
+    ServiceDataRuntime.SecurityReady = false;
+    if (!Path.GetFullPath(directory).Equals(Path.GetFullPath(ServiceDataPath()), StringComparison.OrdinalIgnoreCase))
         throw new IOException("Service data path is invalid.");
-    }
-
-    if (Directory.Exists(fullPath)
-        && File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint))
-    {
-        throw new IOException("Service data directory cannot be a reparse point.");
-    }
-
-    Directory.CreateDirectory(fullPath);
-    var user = new SecurityIdentifier(authorizedSid);
-    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-    var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-    SecureDirectory(fullPath);
+    SafeSecurityTree.Ensure(directory, authorizedSid, setProtectedOwner, deferredPolicySid: authorizedSid);
     ServiceDataRuntime.SecurityReady = true;
-
-    void SecureDirectory(string current)
-    {
-        var directorySecurity = new DirectorySecurity();
-        directorySecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        if (setProtectedOwner)
-        {
-            directorySecurity.SetOwner(administrators);
-        }
-        var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-        directorySecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        directorySecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        directorySecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        new DirectoryInfo(current).SetAccessControl(directorySecurity);
-
-        foreach (var entry in Directory.EnumerateFileSystemEntries(current))
-        {
-            var attributes = File.GetAttributes(entry);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new IOException($"Reparse point rejected in service data: {entry}");
-            }
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                SecureDirectory(entry);
-                continue;
-            }
-
-            var fileSecurity = new FileSecurity();
-            fileSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            if (setProtectedOwner)
-            {
-                fileSecurity.SetOwner(administrators);
-            }
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize, AccessControlType.Allow));
-            new FileInfo(entry).SetAccessControl(fileSecurity);
-        }
-    }
 }
 
 static void SecureAgentInstallationDirectory(string authorizedSid, bool setProtectedOwner)
 {
-    var directory = Path.GetDirectoryName(AgentPath())!;
-    if (!Directory.Exists(directory)
-        || File.GetAttributes(directory).HasFlag(FileAttributes.ReparsePoint))
-    {
-        throw new IOException("Beszel Agent installation directory is missing or is a reparse point.");
-    }
-
-    var user = new SecurityIdentifier(authorizedSid);
-    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-    var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-    SecureDirectory(directory);
-
-    void SecureDirectory(string current)
-    {
-        var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-        var security = new DirectorySecurity();
-        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-        if (setProtectedOwner)
-        {
-            security.SetOwner(administrators);
-        }
-        security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        new DirectoryInfo(current).SetAccessControl(security);
-
-        foreach (var entry in Directory.EnumerateFileSystemEntries(current))
-        {
-            var attributes = File.GetAttributes(entry);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new IOException($"Reparse point rejected in Beszel Agent installation: {entry}");
-            }
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                SecureDirectory(entry);
-                continue;
-            }
-            var fileSecurity = new FileSecurity();
-            fileSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            if (setProtectedOwner)
-            {
-                fileSecurity.SetOwner(administrators);
-            }
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize, AccessControlType.Allow));
-            new FileInfo(entry).SetAccessControl(fileSecurity);
-        }
-    }
+    SafeSecurityTree.Ensure(Path.GetDirectoryName(AgentPath())!, authorizedSid, setProtectedOwner, deferredPolicySid: authorizedSid);
 }
 
 static BrokerPolicy? LoadBrokerPolicy()
@@ -1814,15 +1707,13 @@ static BrokerPolicy? ReadBrokerPolicy(string path, string? pendingAuthorizedSid,
             return null;
         }
 
-        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (stream.Length > 16 * 1024
-            || File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+        using var pinned = PinnedLocalPath.File(path);
+        using var stream = new FileStream(pinned.Handle, FileAccess.Read);
+        if (stream.Length > 16 * 1024)
         {
             return null;
         }
-        var owner = new FileInfo(path)
-            .GetAccessControl(AccessControlSections.Owner)
-            .GetOwner(typeof(SecurityIdentifier)) as SecurityIdentifier;
+        var owner = pinned.ReadSecurity().Owner;
         var trustedOwner = owner?.IsWellKnown(WellKnownSidType.BuiltinAdministratorsSid) == true
             || owner?.IsWellKnown(WellKnownSidType.LocalSystemSid) == true;
         var policy = JsonSerializer.Deserialize<BrokerPolicy>(stream);
@@ -1896,17 +1787,7 @@ static bool TryReadFingerprint(Dictionary<string, string> arguments, out string 
     return Regex.IsMatch(fingerprint, @"\A[0-9a-f]{48}\z", RegexOptions.CultureInvariant);
 }
 
-static bool TryReadManagerTag(Dictionary<string, string> arguments, out string tag)
-{
-    tag = arguments.GetValueOrDefault("tag")?.Trim() ?? string.Empty;
-    return Regex.IsMatch(tag, @"^v?\d+\.\d+\.\d+(?:-rc\d+)?$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
-}
 
-static bool TryReadManagerVariant(Dictionary<string, string> arguments, out string variant)
-{
-    variant = arguments.GetValueOrDefault("variant")?.Trim().ToLowerInvariant() ?? "bundled";
-    return variant is "bundled" or "lite";
-}
 
 static bool HasRetryStrategyConflict(JsonElement config)
 {
@@ -2189,11 +2070,6 @@ static string AgentLogPath() => Path.Combine(
     "agent_logs",
     "beszel-agent.log");
 
-static bool TryReadRelaunchToken(Dictionary<string, string> arguments, out string token)
-{
-    token = arguments.GetValueOrDefault("relaunchToken")?.Trim().ToLowerInvariant() ?? string.Empty;
-    return Guid.TryParseExact(token, "N", out _);
-}
 
 static bool TryReadBoolean(Dictionary<string, string> arguments, string key, out bool value)
 {
@@ -2229,7 +2105,7 @@ static void TryDeleteFile(string path)
     {
         if (File.Exists(path))
         {
-            File.Delete(path);
+            SafeFileTree.Delete(path);
         }
     }
     catch
@@ -2656,23 +2532,8 @@ static Task DeleteScheduledTaskAsync(string taskName)
 
 static bool TryDeleteDirectory(string path)
 {
-    try
-    {
-        if (!Directory.Exists(path))
-        {
-            return true;
-        }
-
-        _ = RunProcessAsync("takeown.exe", ["/f", path, "/r", "/d", "y"]).GetAwaiter().GetResult();
-        _ = RunProcessAsync("icacls.exe", [path, "/grant", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"]).GetAwaiter().GetResult();
-        _ = RunProcessAsync("icacls.exe", [path, "/grant", "*S-1-5-18:(OI)(CI)F", "/T", "/C"]).GetAwaiter().GetResult();
-        Directory.Delete(path, recursive: true);
-        return true;
-    }
-    catch
-    {
-        return !Directory.Exists(path);
-    }
+    try { SafeFileTree.Delete(path); return true; }
+    catch (Exception ex) { WriteBackgroundLog("WARN", $"Safe cleanup refused: {ex.Message}"); return false; }
 }
 
 static async Task<int> ConfigureServiceAsync(
@@ -3344,6 +3205,15 @@ static async Task<bool> ServiceExistsAsync(string name)
 
 static async Task<int> InstallAgentBinaryAsync(string version, string downloadUrl, string checksumUrl)
 {
+    if (File.Exists(AgentPath()))
+    {
+        var installed = await GetInstalledAgentVersionAsync(AgentPath());
+        if (!SecureVersionPolicy.IsSameOrNewer(version, installed))
+        {
+            WriteBackgroundLog("WARN", $"Agent downgrade from {installed} to {version} rejected.");
+            return 56;
+        }
+    }
     var programFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
     var agentDir = Path.Combine(programFiles, "Beszel-Agent");
     var agentPath = Path.Combine(agentDir, "beszel-agent.exe");
@@ -3435,234 +3305,26 @@ static async Task<AgentRelease?> FetchLatestAgentReleaseAsync()
     return ParseAgentRelease(document.RootElement);
 }
 
-static async Task<int> InstallManagerVersionAsync(string tag, string variant, string relaunchToken)
-{
-    try
-    {
-        var installedVersion = FileVersionInfo.GetVersionInfo(Environment.ProcessPath!).ProductVersion ?? "0.0.0";
-        if (!SecureVersionPolicy.IsSameOrNewer(tag, installedVersion))
-        {
-            WriteBackgroundLog("WARN", $"Broker manager downgrade from {NormalizeVersion(installedVersion)} to {tag} rejected.");
-            return 56;
-        }
-
-        var installerName = variant == "lite"
-            ? managerLiteInstallerName
-            : managerBundledInstallerName;
-        using var http = CreateGitHubClient();
-        var releaseUrl = $"https://api.github.com/repos/{managerRepo}/releases/tags/{Uri.EscapeDataString(tag)}";
-        await using var releaseStream = await http.GetStreamAsync(releaseUrl);
-        using var release = await JsonDocument.ParseAsync(releaseStream);
-        if (!TryGetReleaseAssetUrl(release.RootElement, installerName, out var installerUrl)
-            || !TryGetReleaseAssetUrl(release.RootElement, managerChecksumName, out var checksumUrl))
-        {
-            return 30;
-        }
-
-        var stagingRoot = Path.Combine(ServiceDataPath(), "manager-update");
-        ResetPrivilegedWorkingDirectory(stagingRoot);
-
-        var installerPath = Path.Combine(stagingRoot, installerName);
-        var checksumPath = Path.Combine(stagingRoot, managerChecksumName);
-        await DownloadFileAsync(http, installerUrl, installerPath, 512L * 1024 * 1024);
-        await DownloadFileAsync(http, checksumUrl, checksumPath, 1024 * 1024);
-        if (new FileInfo(installerPath).Attributes.HasFlag(FileAttributes.ReparsePoint)
-            || !VerifyManagerInstallerChecksum(installerPath, checksumPath, installerName)
-            || !await VerifyManagerInstallerSignatureAsync(installerPath))
-        {
-            TryDeleteFile(installerPath);
-            return 31;
-        }
-
-        var policy = LoadBrokerPolicy();
-        if (policy is null || !IsValidAccountSid(policy.AuthorizedSid))
-        {
-            return 32;
-        }
-
-        GrantAuthorizedUserReadAccess(stagingRoot, policy.AuthorizedSid);
-        var completionMarker = Path.Combine(stagingRoot, $"relaunch-{relaunchToken}.complete");
-        var setupLogPath = Path.Combine(stagingRoot, "manager-update-setup.log");
-        var escapedInstaller = installerPath.Replace("'", "''", StringComparison.Ordinal);
-        var escapedCompletionMarker = completionMarker.Replace("'", "''", StringComparison.Ordinal);
-        var escapedSetupLog = setupLogPath.Replace("'", "''", StringComparison.Ordinal);
-        var command =
-            "$exitCode = 1; try { Start-Sleep -Seconds 3; " +
-            $"$setup = Start-Process -FilePath '{escapedInstaller}' " +
-            $"-ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/CLOSEAPPLICATIONS','/LOG={escapedSetupLog}') " +
-            "-Wait -PassThru; $exitCode = $setup.ExitCode } finally { " +
-            $"[System.IO.File]::WriteAllText('{escapedCompletionMarker}', $exitCode.ToString()) }}";
-        Process.Start(new ProcessStartInfo
-        {
-            FileName = Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            ArgumentList =
-            {
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle", "Hidden",
-                "-Command", command,
-            },
-        });
-        return 0;
-    }
-    catch (HttpRequestException)
-    {
-        return 30;
-    }
-    catch (Exception ex)
-    {
-        WriteBackgroundLog("ERROR", $"Manager installer staging failed: {ex}");
-        return 32;
-    }
-}
 
 static void ResetPrivilegedWorkingDirectory(string path)
 {
-    var fullPath = Path.GetFullPath(path);
-    if (Directory.Exists(fullPath))
-    {
-        SecurePrivilegedWorkingDirectory(fullPath);
-    }
-    else
-    {
-        Directory.CreateDirectory(fullPath);
-        SecurePrivilegedWorkingDirectory(fullPath);
-    }
-
-    foreach (var entry in Directory.EnumerateFileSystemEntries(fullPath))
-    {
-        if (Directory.Exists(entry))
-        {
-            Directory.Delete(entry, recursive: true);
-        }
-        else
-        {
-            File.Delete(entry);
-        }
-    }
-
+    SecurePrivilegedWorkingDirectory(path);
+    using var pinned = PinnedLocalPath.Directory(path);
+    pinned.RequireProtected();
+    foreach (var entry in Directory.EnumerateFileSystemEntries(pinned.Path)) SafeFileTree.Delete(entry);
 }
 
 static void SecurePrivilegedWorkingDirectory(string path, bool setProtectedOwner = true)
 {
     var fullPath = Path.GetFullPath(path);
-    var managerData = Path.GetFullPath(ServiceDataPath()).TrimEnd(Path.DirectorySeparatorChar);
-    if (!fullPath.Equals(managerData, StringComparison.OrdinalIgnoreCase)
-        && !fullPath.StartsWith(managerData + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-    {
-        throw new IOException("Privileged working directory is outside manager data.");
-    }
-    if (!Directory.Exists(fullPath)
-        || File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint))
-    {
-        throw new IOException("Privileged working directory is missing or is a reparse point.");
-    }
-
-    SecureAndValidate(fullPath);
-
-    void SecureAndValidate(string directory)
-    {
-        ApplyRestrictedDirectorySecurity(directory, setProtectedOwner);
-        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
-        {
-            var attributes = File.GetAttributes(entry);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new IOException($"Reparse point rejected in privileged working directory: {entry}");
-            }
-
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                SecureAndValidate(entry);
-            }
-            else
-            {
-                ApplyRestrictedFileSecurity(entry, setProtectedOwner);
-            }
-        }
-    }
+    var root = Path.GetFullPath(ServiceDataPath()).TrimEnd(Path.DirectorySeparatorChar);
+    if (!fullPath.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+        throw new IOException("Privileged working directory is outside service data.");
+    SafeSecurityTree.Ensure(fullPath, readSid: null, setOwner: setProtectedOwner);
 }
 
-static void ApplyRestrictedDirectorySecurity(string path, bool setProtectedOwner)
-{
-    var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-    var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-    var security = new DirectorySecurity();
-    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-    if (setProtectedOwner)
-    {
-        security.SetOwner(administrators);
-    }
-    security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
-    security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
-    new DirectoryInfo(path).SetAccessControl(security);
-}
 
-static void ApplyRestrictedFileSecurity(string path, bool setProtectedOwner)
-{
-    var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
-    var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
-    var security = new FileSecurity();
-    security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-    if (setProtectedOwner)
-    {
-        security.SetOwner(administrators);
-    }
-    security.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
-    security.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-    new FileInfo(path).SetAccessControl(security);
-}
 
-static void GrantAuthorizedUserReadAccess(string path, string authorizedSid)
-{
-    var fullPath = Path.GetFullPath(path);
-    var managerData = Path.GetFullPath(ServiceDataPath()).TrimEnd(Path.DirectorySeparatorChar);
-    if ((!fullPath.Equals(managerData, StringComparison.OrdinalIgnoreCase)
-            && !fullPath.StartsWith(managerData + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-        || !Directory.Exists(fullPath)
-        || File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint))
-    {
-        throw new IOException("Manager update staging directory is unsafe.");
-    }
-
-    var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
-    var security = new DirectoryInfo(fullPath).GetAccessControl();
-    security.AddAccessRule(new FileSystemAccessRule(
-        new SecurityIdentifier(authorizedSid),
-        FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
-        inheritance,
-        PropagationFlags.None,
-        AccessControlType.Allow));
-    new DirectoryInfo(fullPath).SetAccessControl(security);
-}
-
-static bool TryGetReleaseAssetUrl(JsonElement release, string expectedName, out string url)
-{
-    url = string.Empty;
-    if (!release.TryGetProperty("assets", out var assets) || assets.ValueKind != JsonValueKind.Array)
-    {
-        return false;
-    }
-
-    foreach (var asset in assets.EnumerateArray())
-    {
-        var name = asset.TryGetProperty("name", out var nameProperty) ? nameProperty.GetString() : null;
-        if (!string.Equals(name, expectedName, StringComparison.OrdinalIgnoreCase))
-        {
-            continue;
-        }
-
-        url = asset.TryGetProperty("browser_download_url", out var urlProperty)
-            ? urlProperty.GetString() ?? string.Empty
-            : string.Empty;
-        return IsTrustedGitHubAssetUrl(url);
-    }
-
-    return false;
-}
 
 static bool IsTrustedGitHubAssetUrl(string url)
 {
@@ -3703,38 +3365,7 @@ static async Task DownloadFileAsync(HttpClient http, string url, string path, lo
     }
 }
 
-static bool VerifyManagerInstallerChecksum(string installerPath, string checksumPath, string installerName)
-{
-    var checksumPattern = $@"^\s*([a-fA-F0-9]{{64}})\s+\*?{Regex.Escape(installerName)}\s*$";
-    var expected = File.ReadLines(checksumPath)
-        .Select(line => Regex.Match(line, checksumPattern, RegexOptions.CultureInvariant))
-        .FirstOrDefault(static match => match.Success)?
-        .Groups[1].Value;
-    if (string.IsNullOrWhiteSpace(expected))
-    {
-        return false;
-    }
 
-    using var stream = File.OpenRead(installerPath);
-    var actual = Convert.ToHexString(SHA256.HashData(stream));
-    return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
-}
-
-static async Task<bool> VerifyManagerInstallerSignatureAsync(string installerPath)
-{
-    var escapedPath = installerPath.Replace("'", "''", StringComparison.Ordinal);
-    var result = await RunProcessAsync(
-        Path.Combine(Environment.SystemDirectory, "WindowsPowerShell", "v1.0", "powershell.exe"),
-        [
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            $"(Get-AuthenticodeSignature -LiteralPath '{escapedPath}').Status.ToString()",
-        ]);
-    var status = result.Output.Trim();
-    return result.ExitCode == 0
-        && string.Equals(status, "Valid", StringComparison.OrdinalIgnoreCase);
-}
 
 static async Task<AgentRelease?> FetchAgentReleaseAsync(string version)
 {
@@ -3812,7 +3443,7 @@ static AgentRelease? ParseAgentRelease(JsonElement release)
 static HttpClient CreateGitHubClient()
 {
     var http = new HttpClient();
-    http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("BeszelAgentManager", "4.21.0"));
+    http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("BeszelAgentManager", "4.21.1"));
     return http;
 }
 

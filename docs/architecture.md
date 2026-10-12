@@ -27,6 +27,13 @@ Mutating operations share one semaphore, preventing tray, UI, and schedule actio
 
 `BeszelAgentManager.Core` contains the shared broker contract and DNS failover coordinator. DNS, agent configuration, time, and persistence are injected boundaries so failover decisions can be tested without changing a real service.
 
+Core also contains the pure TUF verifier and refresh coordinator. The helper
+owns protected checkpoints, download/staging and a detached installer worker.
+The GUI requests prepare/commit; a commit response is accepted, not completed.
+Installer completion is persisted and shown after an unelevated session relaunch.
+The two signing tools are operator/publisher tools and are not distributed
+with the application.
+
 ### Installer
 
 Inno Setup installs the WinUI application and helper, places NSSM beside the agent in a protected Program Files directory, configures the background service, and preserves v3.1.0 data during upgrade.
@@ -42,6 +49,7 @@ Inno Setup installs the WinUI application and helper, places NSSM beside the age
 | `BeszelAgentManager.ServiceData\dns-fallback-state.json` | Active DNS mode and recovery streak |
 | `BeszelAgentManager.ServiceData\background-service.log` | LocalSystem background-service log |
 | `BeszelAgentManager.ServiceData\agent_logs` | LocalSystem agent output and archives |
+| `BeszelAgentManager.ServiceData\secure-manager-updates` | SYSTEM-only signed metadata history, staged jobs and terminal update results |
 
 The table paths are relative to `C:\ProgramData`. The UI account may modify only the `BeszelAgentManager` configuration area; service data is read-only to that account.
 

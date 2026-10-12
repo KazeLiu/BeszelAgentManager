@@ -1318,7 +1318,7 @@ public sealed partial class MainWindow : Window
             versionSection.Children.Add(new TextBlock { Text = "Open an installer release", FontSize = 17, FontWeight = Microsoft.UI.Text.FontWeights.SemiBold });
             versionSection.Children.Add(new TextBlock
             {
-                Text = "Choose a release. Its official GitHub page opens so you can download and run the installer with administrator approval.",
+                Text = "The latest release uses signed update verification. Older releases open GitHub for manual installation with administrator approval.",
                 Foreground = (Brush)Application.Current.Resources["TextFillColorSecondaryBrush"],
                 TextWrapping = TextWrapping.Wrap,
             });
@@ -1347,7 +1347,7 @@ public sealed partial class MainWindow : Window
                 XamlRoot = NavView.XamlRoot,
                 Title = "Manage Manager Version",
                 Content = panel,
-                PrimaryButtonText = "Open selected release",
+                PrimaryButtonText = "Continue",
                 CloseButtonText = "Cancel",
                 DefaultButton = ContentDialogButton.Primary,
             };
@@ -1358,7 +1358,12 @@ public sealed partial class MainWindow : Window
             }
 
             var selected = releases[Math.Max(0, picker.SelectedIndex)];
-            await InstallManagerReleaseAsync(selected);
+            if (selected.Tag == releases[0].Tag) await InstallManagerReleaseAsync(selected);
+            else
+            {
+                OpenUrl($"https://github.com/{AppInfo.ManagerRepo}/releases/tag/{Uri.EscapeDataString(selected.Tag)}");
+                ShowGlobalStatus(InfoBarSeverity.Informational, "Manual installation required", "Older versions cannot be installed through the privileged updater.");
+            }
         }
         catch (Exception ex)
         {
@@ -1455,16 +1460,19 @@ public sealed partial class MainWindow : Window
 
     private async Task InstallManagerReleaseAsync(ManagerRelease release)
     {
+        if (!await EnsureBackgroundServiceAvailableAsync()) return;
+        ShowGlobalStatus(InfoBarSeverity.Informational, "Verifying signed update", "Downloading and verifying the latest official release for this installation. The application will remain open until you confirm installation.");
+        var staged = await App.Broker.PrepareManagerUpdateAsync();
         var confirm = new ContentDialog
         {
             XamlRoot = NavView.XamlRoot,
-            Title = $"Install BeszelAgentManager {release.Version}?",
+            Title = $"Install BeszelAgentManager {staged.Tag}?",
             Content = new TextBlock
             {
-                Text = $"V{release.Version} is not digitally signed. GitHub will open the official release page. Download the {AppInfo.InstallerAssetName} asset and run it manually; Windows will request administrator approval.",
+                Text = $"The {staged.Edition} installer has passed signed metadata, version and SHA-256 verification. The manager will close during installation and reopen in your Windows session. Completion is confirmed after the installed version and background service are checked.",
                 TextWrapping = TextWrapping.Wrap,
             },
-            PrimaryButtonText = "Open release page",
+            PrimaryButtonText = "Install verified update",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
         };
@@ -1473,9 +1481,9 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        App.Logger.Info($"Opening manual manager update page for {release.Tag}");
-        OpenUrl($"https://github.com/{AppInfo.ManagerRepo}/releases/tag/{Uri.EscapeDataString(release.Tag)}");
-        ShowGlobalStatus(InfoBarSeverity.Informational, "Manual update required", $"Download and run {AppInfo.InstallerAssetName} from the opened release page.");
+        await App.Broker.CommitManagerUpdateAsync(staged.OperationId);
+        App.Logger.Info($"Signed manager update accepted for {staged.Tag}; completion pending installer verification.");
+        ExitFromTray();
     }
 
     private void VersionBadgeButton_Click(object sender, RoutedEventArgs e)

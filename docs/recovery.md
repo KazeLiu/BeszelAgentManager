@@ -41,7 +41,21 @@ Use **Extra → Create support bundle** to collect redacted diagnostics.
 
 ## Failed manager update
 
-Use **Manage Manager Version…** to open the official release. Download the installer matching the installed edition, verify it against `SHA256SUMS.txt`, and approve the installer through Windows. The service refuses unsigned silent installation and version downgrades.
+Inspect the update's terminal result and installer log beneath the protected
+`ServiceData\secure-manager-updates` directory. A staged or accepted request
+is not success. Missing/expired/tampered metadata, clock rollback or invalid
+checkpoint storage pauses installation. Do not delete checkpoints or broaden
+ACLs to force an update.
+
+For a stopped worker with a committed operation but no result, an administrator
+must inspect process/installer state before recovery; it is not silently retried.
+If unelevated relaunch failed because the user logged out, open the manager
+manually. An explicit manual recovery installer from the official release still
+requires administrator approval and matching edition verification.
+
+See [signed update operation](signed-updates.md) for key rotation and freshness
+renewal. Windows Authenticode publisher trust is separate from project metadata
+signatures.
 
 ## Failed agent update
 

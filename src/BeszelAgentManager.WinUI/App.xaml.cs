@@ -85,6 +85,25 @@ public partial class App : Application
         {
             MainWindow.PrepareHiddenWindow();
         }
+        if (Environment.GetCommandLineArgs().Contains("--after-secure-update", StringComparer.Ordinal))
+        {
+            try
+            {
+                using var result = System.Text.Json.JsonDocument.Parse(await Broker.GetManagerUpdateResultAsync());
+                if (result.RootElement.TryGetProperty("message", out var message))
+                {
+                    var completed = result.RootElement.TryGetProperty("status", out var status) && status.GetString() == "completed";
+                    MainWindow.ShowActionStatus(completed ? InfoBarSeverity.Success : InfoBarSeverity.Error,
+                        completed ? "Manager update completed" : "Manager update needs attention", message.GetString() ?? "Inspect the background-service log.");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"Could not read manager update result: {ex.Message}");
+                MainWindow.ShowActionStatus(InfoBarSeverity.Warning, "Manager update needs attention",
+                    "Could not verify the update result. Check the installed version and background service in Extra.");
+            }
+        }
     }
 
     private void MainInstance_Activated(object? sender, AppActivationArguments args)

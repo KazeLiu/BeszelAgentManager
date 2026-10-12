@@ -1,4 +1,4 @@
-name: Build and publish release
+name: Build and prepare release
 
 on:
   pull_request:
@@ -8,6 +8,7 @@ on:
       - BeszelAgentManager.sln
       - src/**
       - tests/**
+      - tools/**
       - installer/**
       - .github/workflows/release.yml
   push:
@@ -24,17 +25,22 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build-release:
     runs-on: windows-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      release_name: ${{ steps.version.outputs.release_name }}
+      is_prerelease: ${{ steps.version.outputs.is_prerelease }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Read version
         id: version
@@ -92,6 +98,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "Core tests failed"
           }
+          dotnet build .\tools\BeszelAgentManager.ReleaseSigning\BeszelAgentManager.ReleaseSigning.csproj -c Release
+          if ($LASTEXITCODE -ne 0) {
+            throw "Release signing tool build failed"
+          }
+          dotnet build .\tools\BeszelAgentManager.FreshnessSigning\BeszelAgentManager.FreshnessSigning.csproj -c Release
+          if ($LASTEXITCODE -ne 0) { throw "Freshness signing tool build failed" }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -301,13 +313,44 @@ jobs:
             $env:RELEASE_NOTES_INPUT | Out-File -FilePath RELEASE_NOTES.generated.md -Encoding utf8
           }
 
-      - name: Verify release tag is unused
+      - name: Upload draft release payload
         if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-payload
+          path: |
+            installer-dist/BeszelAgentManagerSetup.exe
+            installer-dist/BeszelAgentManagerSetup-Lite.exe
+            SHA256SUMS.txt
+            RELEASE_NOTES.generated.md
+          if-no-files-found: error
+
+  prepare-draft:
+    needs: build-release
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Checkout trusted release commit
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Download this run's payload
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ steps.version.outputs.tag }}"
+          gh run download $env:GITHUB_RUN_ID --repo $env:GITHUB_REPOSITORY --name release-payload --dir payload
+          if ($LASTEXITCODE -ne 0) { throw "Release payload download failed." }
+      - name: Verify release tag is unused
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ needs.build-release.outputs.tag }}"
 
           git fetch origin "refs/tags/$tag:refs/tags/$tag" 2>$null
           $tagExists = $false
@@ -330,24 +373,24 @@ jobs:
             throw "Release '$tag' already exists. Update VERSION before publishing a new release."
           }
 
-      - name: Publish release
-        if: github.event_name != 'pull_request'
+      - name: Prepare draft release for approval
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = "${{ steps.version.outputs.tag }}"
-          $releaseName = "${{ steps.version.outputs.release_name }}"
+          $tag = "${{ needs.build-release.outputs.tag }}"
+          $releaseName = "${{ needs.build-release.outputs.release_name }}"
           $args = @(
-            "release", "create", $tag,
+            "release", "create", $tag, "--draft",
             "--target", $env:GITHUB_SHA,
             "--title", $releaseName,
-            "--notes-file", "RELEASE_NOTES.generated.md",
-            "installer-dist\BeszelAgentManagerSetup.exe",
-            "installer-dist\BeszelAgentManagerSetup-Lite.exe",
-            "SHA256SUMS.txt"
+            "--notes-file", "payload\RELEASE_NOTES.generated.md",
+            "payload\installer-dist\BeszelAgentManagerSetup.exe",
+            "payload\installer-dist\BeszelAgentManagerSetup-Lite.exe",
+            "payload\SHA256SUMS.txt"
           )
-          if ("${{ steps.version.outputs.is_prerelease }}" -eq "true") {
+          if ("${{ needs.build-release.outputs.is_prerelease }}" -eq "true") {
             $args += "--prerelease"
           }
           gh @args
+          if ($LASTEXITCODE -ne 0) { throw "Draft release creation failed." }

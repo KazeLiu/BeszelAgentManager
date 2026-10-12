@@ -1,0 +1,70 @@
+name: Renew signed update freshness
+
+on:
+  schedule:
+    - cron: '17 */12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-update-freshness
+  cancel-in-progress: false
+
+jobs:
+  renew:
+    if: github.repository == 'MiranoVerhoef/BeszelAgentManager' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    environment: update-freshness
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+      - name: Fetch approved public metadata
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $repo = 'MiranoVerhoef/BeszelAgentManager'
+          $tag = gh api "repos/$repo/releases/latest" --jq '.tag_name'
+          if ($LASTEXITCODE -ne 0 -or $tag -notmatch '^4\.(0|[1-9][0-9]{0,5})\.(0|[1-9][0-9]{0,5})$') { throw 'Invalid latest stable release.' }
+          New-Item -ItemType Directory -Path public-input | Out-Null
+          gh release download $tag --repo $repo --pattern 'targets.json' --pattern 'snapshot.json' --pattern 'timestamp.json' --pattern '*.root.json' --dir public-input
+          if ($LASTEXITCODE -ne 0) { throw 'Public metadata download failed.' }
+          $tag | Set-Content -LiteralPath current-tag.txt -Encoding ascii
+      - name: Build limited-role signing tool
+        shell: pwsh
+        run: |
+          dotnet build tools/BeszelAgentManager.FreshnessSigning -c Release
+          if ($LASTEXITCODE -ne 0) { throw 'Freshness tool build failed.' }
+      - name: Renew only snapshot and timestamp
+        shell: pwsh
+        env:
+          BESZEL_SNAPSHOT_PRIVATE_PK8_BASE64: ${{ secrets.BESZEL_SNAPSHOT_PRIVATE_PK8_BASE64 }}
+          BESZEL_SNAPSHOT_PASSPHRASE: ${{ secrets.BESZEL_SNAPSHOT_PASSPHRASE }}
+          BESZEL_TIMESTAMP_PRIVATE_PK8_BASE64: ${{ secrets.BESZEL_TIMESTAMP_PRIVATE_PK8_BASE64 }}
+          BESZEL_TIMESTAMP_PASSPHRASE: ${{ secrets.BESZEL_TIMESTAMP_PASSPHRASE }}
+        run: |
+          $tag = (Get-Content -LiteralPath current-tag.txt -Raw).Trim()
+          & tools/BeszelAgentManager.FreshnessSigning/bin/Release/net10.0/BeszelAgentManager.FreshnessSigning.exe public-input renewed $tag
+          if ($LASTEXITCODE -ne 0) { throw 'Metadata renewal refused.' }
+      - name: Publish snapshot before timestamp
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $repo = 'MiranoVerhoef/BeszelAgentManager'
+          $tag = (Get-Content -LiteralPath current-tag.txt -Raw).Trim()
+          $latest = gh api "repos/$repo/releases/latest" --jq '.tag_name'
+          if ($LASTEXITCODE -ne 0 -or $latest -ne $tag) { throw 'Latest release changed; retry against the new release.' }
+          gh release upload $tag --repo $repo renewed/snapshot.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Snapshot upload failed; timestamp was not replaced.' }
+          gh release upload $tag --repo $repo renewed/timestamp.json --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Timestamp upload failed; clients remain fail-closed until retry.' }

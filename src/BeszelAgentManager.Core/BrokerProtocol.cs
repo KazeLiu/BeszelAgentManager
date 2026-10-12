@@ -31,6 +31,11 @@ public sealed class BrokerResponse
         ErrorCode = errorCode,
         Message = message,
     };
+
+    public static BrokerResponse Accepted(string requestId) => new()
+    {
+        RequestId = requestId, State = "accepted", Success = true, Message = "accepted",
+    };
 }
 
 public sealed class BrokerAgentStatus

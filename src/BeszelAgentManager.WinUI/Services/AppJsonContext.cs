@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using BeszelAgentManager.Core;
+using BeszelAgentManager.Core.Updates;
 
 namespace BeszelAgentManager.WinUI.Services;
 
@@ -12,5 +13,6 @@ namespace BeszelAgentManager.WinUI.Services;
 [JsonSerializable(typeof(BrokerRequest))]
 [JsonSerializable(typeof(BrokerResponse))]
 [JsonSerializable(typeof(BrokerAgentStatus))]
+[JsonSerializable(typeof(ManagerUpdateStage))]
 [JsonSerializable(typeof(string))]
 internal partial class AppJsonContext : JsonSerializerContext;

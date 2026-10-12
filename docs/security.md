@@ -26,14 +26,14 @@ The readable account name is used only for logging. Authorization always compare
 
 `C:\ProgramData\BeszelAgentManager` contains user-editable configuration and UI logs. LocalSystem writes only below `C:\ProgramData\BeszelAgentManager.ServiceData`, which has protected ACLs granting the authorized account read and execute access but no write access. NSSM and the agent executable are protected below `C:\Program Files\Beszel-Agent`.
 
-Before privileged recursive cleanup, the service:
+Privileged initialization and cleanup use pinned local object handles:
 
-1. verifies the path remains beneath the protected service-data root;
-2. rejects a reparse-point root;
-3. removes inherited write access;
-4. walks without following reparse points;
-5. rejects any nested reparse point;
-6. deletes only after validation and ACL hardening.
+1. keep ancestors open against rename/replacement;
+2. reject redirected ancestors and untrusted privileged storage ownership;
+3. change ACLs on the same validated object, never a newly resolved pathname;
+4. reject hard links before applying privileged file permissions;
+5. unlink cleanup junctions without traversing their targets;
+6. use no recursive takeown/icacls fallback.
 
 Broker configuration is size-bounded and validated before use. Only explicit Beszel Agent variables are accepted, and every applied value rejects NUL, CR, and LF characters. `CA_CERT_FILE` is restricted to an absolute local-drive path. File-backed `TOKEN_FILE`, `KEY_FILE`, and `DATA_DIR` settings and arbitrary process-environment names are rejected for the LocalSystem agent.
 
@@ -43,18 +43,21 @@ During upgrade, the unelevated manager reads any legacy `TOKEN_FILE`, `KEY_FILE`
 
 Manager updates:
 
-- accept only a validated version tag;
+- accept a prepare request with no caller-selected tag/path/URL/edition;
 - retrieve metadata from the hardcoded manager repository;
-- require the exact Bundled or Lite installer name selected from the installed edition and the exact checksum asset name;
+- select the exact Bundled or Lite installer from the protected installed edition;
 - require HTTPS GitHub asset URLs;
 - enforce download-size limits;
-- verify the SHA-256 entry for `BeszelAgentManagerSetup.exe` or `BeszelAgentManagerSetup-Lite.exe` as appropriate;
-- require a valid Authenticode signature for broker installation;
+- verify pinned project-signed TUF metadata and exact installer hash/byte length;
+- enforce expiry, durable counters, root rotation and clock rollback protection;
 - stage under a service-controlled directory;
 - launch only the fixed staged installer with fixed silent arguments;
 - refuse tags older than the installed manager.
 
-Current public installers are unsigned. The WinUI update flow therefore opens the selected official GitHub release page and requires normal administrator approval for manual installation instead of asking the service to run the installer as SYSTEM.
+Project metadata signatures authorize the secure updater without accepting an
+arbitrary Authenticode publisher. Missing metadata fails closed. Older manager
+versions remain an explicit manual installer flow. See [signed updates](signed-updates.md)
+for the offline approval and limited-key renewal boundaries.
 
 Agent updates accept only the expected Windows x64 asset and versioned checksum file from the hardcoded Beszel repository, enforce HTTPS GitHub URLs and size limits, verify the archive's SHA-256 entry, and extract only a verified archive into a restricted temporary directory. Missing checksum assets, missing archive entries, mismatched hashes, and broker-requested downgrades are rejected before installation.
 
