@@ -13,6 +13,7 @@ using System.ServiceProcess;
 using System.Text.Json;
 using System.Text;
 using BeszelAgentManager.Core;
+using BeszelAgentManager.Helper.Updates;
 using Microsoft.Win32;
 
 const string serviceName = "Beszel Agent";
@@ -1615,9 +1616,12 @@ static void ApplyManagerDataSecurity(string dataDirectory, string authorizedSid,
     var system = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null);
     var administrators = new SecurityIdentifier(WellKnownSidType.BuiltinAdministratorsSid, null);
 
-    SecureTree(dataDirectory);
+    // User-controlled children may be hard links or concurrently replaced.
+    // Set inheritance on the pinned directory itself; never rewrite child ACLs.
+    using var pinned = PinnedLocalPath.Directory(dataDirectory, writable: true);
+    ApplyDirectory();
 
-    void ApplyDirectory(string directory)
+    void ApplyDirectory()
     {
         var inheritance = InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit;
         var directorySecurity = new DirectorySecurity();
@@ -1629,37 +1633,7 @@ static void ApplyManagerDataSecurity(string dataDirectory, string authorizedSid,
         directorySecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
         directorySecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, inheritance, PropagationFlags.None, AccessControlType.Allow));
         directorySecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Modify, inheritance, PropagationFlags.None, AccessControlType.Allow));
-        new DirectoryInfo(directory).SetAccessControl(directorySecurity);
-    }
-
-    void SecureTree(string directory)
-    {
-        ApplyDirectory(directory);
-        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
-        {
-            var attributes = File.GetAttributes(entry);
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                throw new IOException($"Refusing to secure reparse point in manager data: {entry}");
-            }
-
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                SecureTree(entry);
-                continue;
-            }
-
-            var fileSecurity = new FileSecurity();
-            fileSecurity.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
-            if (setProtectedOwner)
-            {
-                fileSecurity.SetOwner(administrators);
-            }
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(system, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(administrators, FileSystemRights.FullControl, AccessControlType.Allow));
-            fileSecurity.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.Modify, AccessControlType.Allow));
-            new FileInfo(entry).SetAccessControl(fileSecurity);
-        }
+        pinned.SetDirectorySecurity(directorySecurity, setProtectedOwner);
     }
 }
 

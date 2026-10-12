@@ -21,6 +21,23 @@ already-authenticated root. It does not authenticate its own storage: only a
 protected, durable service store may supply these bytes. Invalid state must
 pause updates, never silently bootstrap again or discard rollback history.
 
+Windows host foundation: `PinnedLocalPath` retains local ancestor handles with
+read/list-directory access and without delete sharing. It rejects reparse
+points, hard-linked files, ambiguous/device/remote paths, untrusted storage
+owners and untrusted write ACLs. Manager user-data permissions are changed on
+the pinned root only, not recursively on user-controlled child files. Regression
+tests exercise ancestor renames, file replacement, junctions and child hard-link
+ACL preservation using disposable local fixtures.
+
+`ProtectedUpdateStore` adds a fixed `secure-manager-updates` directory under
+already-protected ServiceData, SYSTEM-only initialization, bounded checkpoint
+reads, flushed atomic replacement, serialized mutations and authenticated root
+rotation history. A missing checkpoint in an existing store fails closed. This
+host is not yet connected to the background loop. Positive SYSTEM-owned storage,
+power-loss recovery and installer upgrade/uninstall cases require isolated VM
+testing. Existing recursive ServiceData initialization/cleanup and custom code
+roots remain separate release blockers; this foundation does not fix them all.
+
 Before enabling automatic installation:
 
 1. Complete the operator key ceremony and independently confirm the public root.
