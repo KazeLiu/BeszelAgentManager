@@ -3443,7 +3443,7 @@ static AgentRelease? ParseAgentRelease(JsonElement release)
 static HttpClient CreateGitHubClient()
 {
     var http = new HttpClient();
-    http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("BeszelAgentManager", "4.21.1"));
+    http.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("BeszelAgentManager", "4.21.2"));
     return http;
 }
 
