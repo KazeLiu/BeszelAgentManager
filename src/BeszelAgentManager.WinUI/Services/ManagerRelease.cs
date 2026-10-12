@@ -6,4 +6,5 @@ internal sealed record ManagerRelease(
     string? Body,
     string DownloadUrl,
     bool IsPrerelease,
-    DateTimeOffset? PublishedAt);
+    DateTimeOffset? PublishedAt,
+    bool HasUpdateMetadata);

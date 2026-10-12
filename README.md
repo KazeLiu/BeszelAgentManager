@@ -177,6 +177,14 @@ For Lite, start with clean WinUI and Helper output directories before rebuilding
 installer-dist\BeszelAgentManagerSetup-Lite.exe
 ```
 
+## Releasing
+
+Every RC and stable release follows the [release procedure](docs/releasing.md):
+test the exact installer assets, obtain approval, sign update metadata locally,
+verify the assembled draft, then publish only with explicit approval. See
+[signed updates](docs/signed-updates.md) for the trust model and freshness renewal.
+Project-signed metadata is separate from Windows executable publisher signing.
+
 ## Credits
 
 - BeszelAgentManager: Verhoef
