@@ -136,6 +136,17 @@ may be delayed or disabled by GitHub; monitor failed renewal runs and metadata
 expiry. RC metadata is deliberately not automatically renewed and must be
 renewed manually for continued prerelease testing.
 
+The local ReleaseSigning command `configure-renewal <key-directory>` checks the
+main-only environment policy, requests explicit UPLOAD confirmation, and prompts
+for the existing snapshot and timestamp passwords. Both keys must match pinned
+role authorities before any secret is uploaded. It re-encrypts CI copies using
+fresh, independent random passwords; original files/passwords remain local and
+unchanged. Secrets are passed to the installed Program Files GitHub CLI through
+stdin, never arguments or temporary files. No root/targets private keys are read.
+After root rotation, supply the public root-chain directory as a second argument.
+If an upload fails partway, rerun setup; do not run renewal until all four secrets
+have been configured successfully.
+
 The online tool verifies pinned trust and consecutive public roots, targets,
 release identity and key-to-role assignment before signing. It changes no
 targets or installer bytes, checks the complete result for both editions, and

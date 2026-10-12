@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -13,6 +14,9 @@ try
     {
         case "keygen" when args.Length == 3:
             GenerateKey(args[1], args[2]);
+            break;
+        case "configure-renewal" when args.Length is 2 or 3:
+            ConfigureRenewal(args[1], args.Length == 3 ? args[2] : null);
             break;
         case "root" when args.Length == 5:
             var roleKeys = new Dictionary<string, IReadOnlyList<JsonElement>>();
@@ -232,6 +236,114 @@ static void RejectRepositoryOrReparsePath(string path)
     }
 }
 
+static void ConfigureRenewal(string directory, string? publicRoots)
+{
+    if (Console.IsInputRedirected) throw new ArgumentException("Interactive console required.");
+    var gh = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI", "gh.exe");
+    if (!File.Exists(gh)) throw new IOException("Install GitHub CLI in Program Files and sign in first.");
+    var repo = TufUpdateVerifier.Repository;
+    const string environment = "update-freshness";
+    var policy = TufJson.Parse(Encoding.UTF8.GetBytes(GitHub(["api", $"repos/{repo}/environments/{environment}"])));
+    var branches = policy.GetProperty("deployment_branch_policy");
+    if (branches.GetProperty("protected_branches").ValueKind != JsonValueKind.False
+        || branches.GetProperty("custom_branch_policies").ValueKind != JsonValueKind.True)
+        throw new IOException("Renewal environment must use custom main-only branch policies.");
+    var rules = TufJson.Parse(Encoding.UTF8.GetBytes(GitHub(["api", $"repos/{repo}/environments/{environment}/deployment-branch-policies"])))
+        .GetProperty("branch_policies");
+    if (rules.GetArrayLength() != 1 || rules[0].GetProperty("name").GetString() != "main"
+        || rules[0].GetProperty("type").GetString() != "branch")
+        throw new IOException("Renewal environment is not restricted to the main branch.");
+    var state = PinnedUpdateTrust.Bootstrap();
+    if (publicRoots is not null)
+    {
+        for (var count = 0; count < 64; count++)
+        {
+            var next = Path.Combine(publicRoots, $"{checked(state.RootVersion + 1)}.root.json");
+            if (!File.Exists(next)) break;
+            state = TufUpdateVerifier.RotateRoot(state, ReadMetadata(next));
+            if (count == 63) throw new UpdateMetadataException("Root rotation limit reached.");
+        }
+    }
+    Console.WriteLine("Upload ONLY snapshot/timestamp copies to the official main-only renewal environment.");
+    Console.WriteLine("Root/targets keys and existing passwords stay local. New random CI passwords will not be displayed.");
+    Console.Write("Type UPLOAD to continue: ");
+    if (Console.ReadLine() != "UPLOAD") throw new ArgumentException("Renewal setup canceled.");
+    var secrets = new List<(string Role, byte[] Encrypted, char[] Password)>();
+    try
+    {
+        // Validate BOTH keys before uploading anything. Original files are unchanged.
+        foreach (var role in new[] { "snapshot", "timestamp" })
+        {
+            var path = Path.Combine(directory, role + ".private.pk8");
+            RejectRepositoryOrReparsePath(path);
+            var original = ReadBounded(path, 16 * 1024);
+            char[] password = [];
+            char[] ciPassword = [];
+            try
+            {
+                password = Password($"{role} existing key passphrase: ");
+                using var key = ECDsa.Create();
+                key.ImportEncryptedPkcs8PrivateKey(password, original, out var consumed);
+                if (consumed != original.Length || !TufUpdateVerifier.IsAuthorizedRenewalKey(state, role, key))
+                    throw new CryptographicException("The key does not match the authorized renewal role.");
+                var random = RandomNumberGenerator.GetBytes(32);
+                try { ciPassword = Convert.ToHexString(random).ToCharArray(); }
+                finally { CryptographicOperations.ZeroMemory(random); }
+                var encrypted = key.ExportEncryptedPkcs8PrivateKey(ciPassword,
+                    new PbeParameters(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 600_000));
+                secrets.Add((role, encrypted, ciPassword));
+                ciPassword = []; // Ownership transferred to final cleanup.
+            }
+            finally { Array.Clear(password); Array.Clear(ciPassword); CryptographicOperations.ZeroMemory(original); }
+        }
+        foreach (var secret in secrets)
+        {
+            var prefix = "BESZEL_" + secret.Role.ToUpperInvariant();
+            Set(prefix + "_PRIVATE_PK8_BASE64", Convert.ToBase64String(secret.Encrypted).AsMemory());
+            Set(prefix + "_PASSPHRASE", secret.Password);
+        }
+        Console.WriteLine("Renewal configured: four limited-role environment secrets stored. Original keys/passwords unchanged.");
+    }
+    finally
+    {
+        foreach (var secret in secrets) { Array.Clear(secret.Password); CryptographicOperations.ZeroMemory(secret.Encrypted); }
+    }
+    void Set(string name, ReadOnlyMemory<char> value)
+    {
+        _ = GitHub(["secret", "set", name, "--repo", repo, "--env", environment], value);
+        Console.WriteLine($"Configured {name}.");
+    }
+    string GitHub(string[] arguments, ReadOnlyMemory<char>? secret = null)
+    {
+        var start = new ProcessStartInfo(gh)
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+        };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ?? throw new IOException("GitHub CLI could not start.");
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var output = process.StandardOutput.ReadToEndAsync(timeout.Token);
+        var error = process.StandardError.ReadToEndAsync(timeout.Token);
+        try
+        {
+            if (secret is { } value) process.StandardInput.WriteAsync(value, timeout.Token).GetAwaiter().GetResult();
+            process.StandardInput.Close();
+            process.WaitForExitAsync(timeout.Token).GetAwaiter().GetResult();
+            var result = output.GetAwaiter().GetResult();
+            _ = error.GetAwaiter().GetResult(); // Never echo potentially sensitive CLI output.
+            if (process.ExitCode != 0) throw new IOException("GitHub CLI refused renewal setup. Check login/environment permissions and retry; no secret values are printed.");
+            return result;
+        }
+        catch
+        {
+            if (!process.HasExited) process.Kill(entireProcessTree: true);
+            throw;
+        }
+    }
+}
+
 static long Counter(string value) => long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsed)
     && parsed > 0 ? parsed : throw new ArgumentException("Use a positive, increasing metadata version.");
 
@@ -240,6 +352,7 @@ static DateTimeOffset Expiry(string value) => DateTimeOffset.TryParseExact(value
     && parsed > DateTimeOffset.UtcNow ? parsed : throw new ArgumentException("Use a future UTC expiry: yyyy-MM-ddTHH:mm:ssZ.");
 
 static string Usage() => "Commands:\n"
+    + "  configure-renewal <outside-repository-key-directory> [public-root-chain-directory]\n"
     + "  verify-release <public-metadata-directory> <installer-directory> <tag>\n"
     + "  verify-root <signed-root>\n"
     + "  keygen <outside-repository-directory> <role-name>\n"
