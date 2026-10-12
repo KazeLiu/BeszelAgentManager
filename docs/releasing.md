@@ -9,10 +9,14 @@ Required flow for every version: version-only PR -> Actions draft -> local testi
 of those exact assets -> maintainer approval -> local password-prompted metadata
 signing -> upload signed public metadata -> **Verify and publish signed release**
 workflow on main. Dispatch that workflow with the approved tag only after testing
-and signing. It needs no signing keys or passwords; a read-only job verifies the
-draft, then a write-enabled job independently downloads and verifies it again
+and signing. It needs no signing keys or passwords; the first job verifies the
+draft, then a separate job independently downloads and verifies it again
 before publication. Any failure leaves the draft unpublished. Stable becomes
 latest; RC remains a prerelease. Never bypass it with manual draft publication.
+
+Both jobs require repository contents-write permission because GitHub hides drafts
+from read-only Actions tokens. The first job never publishes; only the second job
+invokes the publication switch after repeating all verification checks.
 
 The workflow checks pinned signatures, expiry, both installer hashes/sizes and
 versions, channel, trusted commit ancestry and advancement beyond latest stable.

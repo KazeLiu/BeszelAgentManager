@@ -19,6 +19,9 @@ jobs:
   verify:
     if: github.repository == 'MiranoVerhoef/BeszelAgentManager' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
+    # GitHub requires release-write access even to enumerate unpublished drafts.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
         with:
