@@ -5,6 +5,21 @@ a **draft**, not permission to publish. Stop at any failed or unapproved gate.
 The maintainer must explicitly approve publication; installer test approval alone
 does not authorize it.
 
+Required flow for every version: version-only PR -> Actions draft -> local testing
+of those exact assets -> maintainer approval -> local password-prompted metadata
+signing -> upload signed public metadata -> **Verify and publish signed release**
+workflow on main. Dispatch that workflow with the approved tag only after testing
+and signing. It needs no signing keys or passwords; a read-only job verifies the
+draft, then a write-enabled job independently downloads and verifies it again
+before publication. Any failure leaves the draft unpublished. Stable becomes
+latest; RC remains a prerelease. Never bypass it with manual draft publication.
+
+The workflow checks pinned signatures, expiry, both installer hashes/sizes and
+versions, channel, trusted commit ancestry and advancement beyond latest stable.
+It rechecks asset identity and latest-release identity immediately before publishing.
+GitHub asset mutation and publication are not a transactional lock: restrict
+release-write access and do not edit drafts during verification/publication.
+
 ## 1. Prepare and review
 
 - Use only the version number for the branch and PR title, such as `4.21.1`.
