@@ -52,7 +52,11 @@ foreach ($asset in $assets) {
 }
 $root = Join-Path $PSScriptRoot '..'
 $anchor = Join-Path $root 'src/BeszelAgentManager.Core/Updates/Trust/root.json'
-if ((Get-FileHash $anchor).Hash -ne (Get-FileHash (Join-Path $directory '1.root.json')).Hash) { throw 'Initial public root differs from embedded trust.' }
+# Git checkout may convert LF to CRLF on Windows. Only normalize line endings;
+# all root content must still match, and the verifier uses embedded trust below.
+$expectedRoot = [IO.File]::ReadAllText($anchor).Replace("`r`n", "`n")
+$providedRoot = [IO.File]::ReadAllText((Join-Path $directory '1.root.json')).Replace("`r`n", "`n")
+if ($expectedRoot -cne $providedRoot) { throw 'Initial public root differs from embedded trust.' }
 & dotnet build (Join-Path $PSScriptRoot 'BeszelAgentManager.ReleaseSigning') -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Verifier build failed.' }
 $tool = Join-Path $PSScriptRoot 'BeszelAgentManager.ReleaseSigning/bin/Release/net10.0/BeszelAgentManager.ReleaseSigning.exe'
