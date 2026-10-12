@@ -1481,13 +1481,13 @@ public sealed partial class MainWindow : Window
         var confirm = new ContentDialog
         {
             XamlRoot = NavView.XamlRoot,
-            Title = $"Install BeszelAgentManager {staged.Tag}?",
+            Title = "Hashes verified",
             Content = new TextBlock
             {
-                Text = $"The {staged.Edition} installer has passed signed metadata, version and SHA-256 verification. The manager will close during installation and reopen in your Windows session. Completion is confirmed after the installed version and background service are checked.",
+                Text = $"BeszelAgentManager {staged.Tag} is ready to install.",
                 TextWrapping = TextWrapping.Wrap,
             },
-            PrimaryButtonText = "Install verified update",
+            PrimaryButtonText = "Begin update",
             CloseButtonText = "Cancel",
             DefaultButton = ContentDialogButton.Primary,
         };
