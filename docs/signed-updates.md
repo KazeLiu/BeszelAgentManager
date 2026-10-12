@@ -10,7 +10,16 @@ checksum/any-valid-Authenticode launcher has been removed, not retained as a fal
 The refresh coordinator awaits a durable checkpoint after each verified role,
 before fetching the next role. Interrupted downloads retain accepted history;
 checkpoint failures abort the refresh. Its transport/storage callbacks are not
-yet connected to service-controlled HTTP and protected filesystem storage.
+yet connected to protected filesystem storage or a production refresh loop.
+`OfficialUpdateTransport` provides size/time-bounded HTTPS metadata downloads from
+the fixed repository, with manual allowlisted redirects, no credentials/cookies,
+and no transparent content decoding. The default endpoint is stable/latest;
+an exact validated tag supports a future prerelease lookup. Root filenames are
+positive versioned `N.root.json` names; the host still must authenticate rotation.
+`TufCheckpointCodec` binds accepted counters, hashes and clock history to the
+already-authenticated root. It does not authenticate its own storage: only a
+protected, durable service store may supply these bytes. Invalid state must
+pause updates, never silently bootstrap again or discard rollback history.
 
 Before enabling automatic installation:
 
@@ -32,8 +41,11 @@ Before enabling automatic installation:
 8. Exercise the tamper, replay, clock, key-rotation, interrupted-update and
    Bundled/Lite matrix. Provide numbered installer tests and await approval.
 
-This stage is deliberately fail-closed. No production keys were generated, no
-root is trusted yet, and no release is published by this implementation.
+This stage is deliberately fail-closed. The operator generated production keys
+outside the repository and signed root version 1 with two root keys. The public
+root is embedded in Core and its signature threshold is covered by a build test.
+Private keys are not included. Transport, protected persistence and installer
+execution remain release gates; no release is published by this implementation.
 
 ## Protocol profile
 
@@ -87,6 +99,7 @@ Run the built executable with these commands:
 
 ```text
 keygen <outside-repository-directory> <role-name>
+verify-root <signed-root>
 root <public-key-directory> <root-counter> <UTC-expiry> <unsigned-output>
 targets <installer-directory> <release-tag> <targets-counter> <UTC-expiry> <unsigned-output>
 sign <input-envelope> <encrypted-private-key> <new-output>

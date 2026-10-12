@@ -9,7 +9,66 @@ namespace BeszelAgentManager.Core.Tests;
 
 public sealed class TufUpdateVerifierTests
 {
+    [Fact]
+    public void EmbeddedProductionRootMeetsSignatureThreshold()
+    {
+        var state = PinnedUpdateTrust.Bootstrap();
+        Assert.Equal(1, state.RootVersion);
+        Assert.Equal(0, state.TimestampVersion);
+    }
+
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-10-06T12:00:00Z");
+
+    [Fact]
+    public void CheckpointsRoundTripPartialAndCompletedRefreshes()
+    {
+        using var fixture = new Fixture();
+        var timestamp = TufUpdateVerifier.AcceptTimestamp(fixture.State, fixture.Timestamp, Now);
+        var snapshot = TufUpdateVerifier.AcceptSnapshot(timestamp, fixture.Timestamp, fixture.Snapshot, Now);
+        foreach (var state in new[] { fixture.State, timestamp, snapshot, fixture.Verify().State })
+        {
+            var restored = TufCheckpointCodec.Decode(TufCheckpointCodec.Encode(state), fixture.State);
+            Assert.Equal(state.TimestampVersion, restored.TimestampVersion);
+            Assert.Equal(state.TimestampHash, restored.TimestampHash);
+            Assert.Equal(state.SnapshotVersion, restored.SnapshotVersion);
+            Assert.Equal(state.TargetsVersion, restored.TargetsVersion);
+            Assert.Equal(state.LastVerifiedUtc, restored.LastVerifiedUtc);
+        }
+    }
+
+    [Fact]
+    public void CheckpointsCannotSubstituteRootOrLowerAcceptedHistory()
+    {
+        using var fixture = new Fixture();
+        using var other = new Fixture();
+        Assert.Throws<UpdateMetadataException>(() => TufCheckpointCodec.Decode(
+            TufCheckpointCodec.Encode(fixture.State), other.State));
+        Assert.Throws<UpdateMetadataException>(() => TufCheckpointCodec.Decode(
+            TufCheckpointCodec.Encode(fixture.State), fixture.Verify().State));
+    }
+
+    [Theory]
+    [InlineData("timestamp_version", -1)]
+    [InlineData("format", 2)]
+    [InlineData("root_version", 2)]
+    public void CheckpointCorruptionFailsClosed(string field, int value)
+    {
+        using var fixture = new Fixture();
+        var corrupt = Change(TufCheckpointCodec.Encode(fixture.Verify().State), n => n[field] = value);
+        Assert.Throws<UpdateMetadataException>(() => TufCheckpointCodec.Decode(corrupt, fixture.State));
+    }
+
+    [Theory]
+    [InlineData("timestamp_hash", "invalid")]
+    [InlineData("last_verified_utc", "not-a-time")]
+    [InlineData("last_verified_utc", null)]
+    [InlineData("unrecognized", "value")]
+    public void CheckpointRejectsMalformedHistory(string field, string? value)
+    {
+        using var fixture = new Fixture();
+        var corrupt = Change(TufCheckpointCodec.Encode(fixture.Verify().State), n => n[field] = value);
+        Assert.Throws<UpdateMetadataException>(() => TufCheckpointCodec.Decode(corrupt, fixture.State));
+    }
 
     [Theory]
     [InlineData("bundled", "BeszelAgentManagerSetup.exe")]

@@ -53,6 +53,11 @@ try
                 CryptographicOperations.ZeroMemory(encryptedKey);
             }
             break;
+        case "verify-root" when args.Length == 2:
+            var rootBytes = ReadMetadata(args[1]);
+            var rootState = TufUpdateVerifier.Bootstrap(rootBytes);
+            Console.WriteLine($"Verified root version {rootState.RootVersion}: {TufJson.Sha256(rootBytes)}");
+            break;
         case "verify" when args.Length == 7:
             var state = TufUpdateVerifier.Bootstrap(ReadMetadata(args[1]));
             var verified = TufUpdateVerifier.Verify(state, ReadMetadata(args[2]), ReadMetadata(args[3]),
@@ -84,8 +89,10 @@ static void GenerateKey(string directory, string name)
     var confirmation = Password("Confirm passphrase: ");
     try
     {
-        if (password.Length < 16 || !password.AsSpan().SequenceEqual(confirmation))
-            throw new ArgumentException("Passphrases must match and contain at least 16 characters.");
+        if (password.Length < 16)
+            throw new ArgumentException("Passphrase is too short: enter at least 16 characters. Each accepted character shows a star.");
+        if (!password.AsSpan().SequenceEqual(confirmation))
+            throw new ArgumentException("Confirmation does not match the first passphrase. No key was created.");
         using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
         var encrypted = key.ExportEncryptedPkcs8PrivateKey(password,
             new PbeParameters(PbeEncryptionAlgorithm.Aes256Cbc, HashAlgorithmName.SHA256, 600_000));
@@ -164,11 +171,18 @@ static char[] Password(string prompt)
         {
             var key = Console.ReadKey(intercept: true);
             if (key.Key == ConsoleKey.Enter) break;
-            if (key.Key == ConsoleKey.Backspace) { if (count > 0) buffer[--count] = '\0'; continue; }
+            if (key.Key == ConsoleKey.V && key.Modifiers.HasFlag(ConsoleModifiers.Control))
+                throw new ArgumentException("This terminal did not paste text. Type the passphrase manually or use the terminal's paste menu. No key was created.");
+            if (key.Key == ConsoleKey.Backspace)
+            {
+                if (count > 0) { buffer[--count] = '\0'; Console.Write("\b \b"); }
+                continue;
+            }
             if (!char.IsControl(key.KeyChar))
             {
                 if (count == buffer.Length) throw new ArgumentException("Passphrase is too long.");
                 buffer[count++] = key.KeyChar;
+                Console.Write('*');
             }
         }
         Console.WriteLine();
@@ -204,6 +218,7 @@ static DateTimeOffset Expiry(string value) => DateTimeOffset.TryParseExact(value
     && parsed > DateTimeOffset.UtcNow ? parsed : throw new ArgumentException("Use a future UTC expiry: yyyy-MM-ddTHH:mm:ssZ.");
 
 static string Usage() => "Commands:\n"
+    + "  verify-root <signed-root>\n"
     + "  keygen <outside-repository-directory> <role-name>\n"
     + "  root <public-key-directory> <version> <UTC-expiry> <output>\n"
     + "  targets <installer-directory> <tag> <version> <UTC-expiry> <output>\n"
