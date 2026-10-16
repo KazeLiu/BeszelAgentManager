@@ -1372,6 +1372,11 @@ Manager settings and manager logs are kept.</value>
     <value>ZFS pool detail refresh interval (scrub, vdevs, datasets), for example 1h. Not applicable to Windows.</value>
   </data>
   <data name="LanguageSaved" xml:space="preserve"><value>Language saved</value></data>
+  <data name="RestartForLanguageChange" xml:space="preserve"><value>Restart BeszelAgentManager now to apply the new language?</value></data>
+  <data name="RestartNow" xml:space="preserve"><value>Restart now</value></data>
+  <data name="Later" xml:space="preserve"><value>Later</value></data>
+  <data name="ManagerRestartFailed" xml:space="preserve"><value>Could not restart manager</value></data>
+  <data name="LanguageSavedRestartManually" xml:space="preserve"><value>Your language preference is saved. Please restart the manager manually.</value></data>
   <data name="Language" xml:space="preserve"><value>Language</value></data>
   <data name="SwitchLanguage" xml:space="preserve"><value>Switch language</value></data>
   <data name="StateRunning" xml:space="preserve"><value>RUNNING</value></data>

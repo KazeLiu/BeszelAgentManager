@@ -2,7 +2,7 @@
 
 ## Choose a language
 
-Open **Extra → Language → Switch language** and select **English (original)** or **简体中文**. Exit from the tray menu and reopen the manager to apply the choice. Closing the window only hides it to the tray.
+Open **Extra → Language → Switch language** and select **English (original)** or **简体中文**. After a changed value is saved successfully, a dialog offers **Restart now** or **Later**. Restarting applies the new language; choosing Later keeps the application open with the preference saved for its next launch. Selecting the already-saved value does not prompt.
 
 English is the default for new and existing configurations without `ui_language`. The supported values are `en-US` and `zh-Hans`; unsupported values use English. Language changes do not enter the agent configuration fingerprint or alter service commands, environment variable names, log filter identifiers, or update trust.
 

@@ -1372,6 +1372,11 @@ GitHub 最新版本：{1}（{2}）</value>
     <value>ZFS 存储池详情（scrub、vdev、数据集）刷新间隔，例如 1h。不适用于 Windows。</value>
   </data>
   <data name="LanguageSaved" xml:space="preserve"><value>语言已保存</value></data>
+  <data name="RestartForLanguageChange" xml:space="preserve"><value>是否立即重启 BeszelAgentManager，使新语言生效？</value></data>
+  <data name="RestartNow" xml:space="preserve"><value>立即重启</value></data>
+  <data name="Later" xml:space="preserve"><value>稍后</value></data>
+  <data name="ManagerRestartFailed" xml:space="preserve"><value>管理器重启失败</value></data>
+  <data name="LanguageSavedRestartManually" xml:space="preserve"><value>语言设置已保存，请手动重启管理器。</value></data>
   <data name="Language" xml:space="preserve"><value>语言</value></data>
   <data name="SwitchLanguage" xml:space="preserve"><value>切换语言</value></data>
   <data name="StateRunning" xml:space="preserve"><value>正在运行</value></data>

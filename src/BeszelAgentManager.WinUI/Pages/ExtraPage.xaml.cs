@@ -2,6 +2,7 @@ using BeszelAgentManager.WinUI.Services;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.Windows.AppLifecycle;
 using Windows.ApplicationModel.DataTransfer;
 
 namespace BeszelAgentManager.WinUI.Pages;
@@ -51,13 +52,18 @@ public sealed partial class ExtraPage : Page
         }
 
         var previousLanguage = _config.UiLanguage;
+        if (language == previousLanguage)
+        {
+            return;
+        }
+
+        LanguageComboBox.IsEnabled = false;
         try
         {
             var persisted = await _configService.LoadAsync();
             persisted.UiLanguage = language;
             await _configService.SaveAsync(persisted);
             _config.UiLanguage = language;
-            App.MainWindow.ShowActionStatus(InfoBarSeverity.Success, Localization.Get("LanguageSaved"), string.Empty);
         }
         catch (Exception ex)
         {
@@ -66,6 +72,28 @@ public sealed partial class ExtraPage : Page
             _loading = false;
             App.Logger.Error($"Could not save UI language: {ex}");
             App.MainWindow.ShowActionStatus(InfoBarSeverity.Error, Localization.Get("CouldNotSaveSettings"), ex.Message);
+            return;
+        }
+        finally
+        {
+            LanguageComboBox.IsEnabled = true;
+        }
+
+        var restartDialog = new ContentDialog
+        {
+            XamlRoot = App.MainWindow.Content.XamlRoot,
+            Title = Localization.Get("LanguageSaved"),
+            Content = Localization.Get("RestartForLanguageChange"),
+            PrimaryButtonText = Localization.Get("RestartNow"),
+            CloseButtonText = Localization.Get("Later"),
+            DefaultButton = ContentDialogButton.Close,
+        };
+        if (await restartDialog.ShowAsync() == ContentDialogResult.Primary)
+        {
+            var failure = AppInstance.Restart(string.Empty);
+            App.Logger.Error($"Manager restart failed after language change: {failure}");
+            App.MainWindow.ShowActionStatus(InfoBarSeverity.Error,
+                Localization.Get("ManagerRestartFailed"), Localization.Get("LanguageSavedRestartManually"));
         }
     }
 

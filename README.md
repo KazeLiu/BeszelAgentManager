@@ -27,7 +27,7 @@ Version 4 is a native .NET 10 and WinUI 3 application. Routine administrative ac
 
 ## Language
 
-English remains the default. To use Simplified Chinese, open **Extra → Language → Switch language**, choose **简体中文**, then **Exit** from the tray menu and reopen the application. Choose **English (original)** in the same place to restore the original English interface.
+English remains the default. To use Simplified Chinese, open **Extra → Language → Switch language**, choose **简体中文**, then choose **Restart now** in the confirmation dialog. Choose **English (original)** in the same place to restore the original English interface. Choosing **Later** saves the preference for the next launch. Selecting the already-saved language does not prompt for a restart.
 
 The choice is saved in `ui_language` and does not change agent environment variables, service identifiers, or update settings. The installer offers English and Simplified Chinese independently of the application language. Logs, upstream release notes, and raw external error details retain their original text.
 
