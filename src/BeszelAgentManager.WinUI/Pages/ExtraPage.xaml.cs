@@ -242,20 +242,18 @@ public sealed partial class ExtraPage : Page
         }
 
         var enabled = WebSocketBackoffCheckBox.IsChecked == true;
-        if (RetryStrategyPolicy.HasConflict(enabled, _config.GetEnvironmentValue("exit_on_dns_error")))
-        {
-            WebSocketBackoffCheckBox.IsChecked = _config.WebSocketOfflineBackoffEnabled;
-            App.MainWindow.ShowActionStatus(
-                InfoBarSeverity.Warning,
-                Localization.Get("ConflictingRetrySettings"),
-                Localization.Get("RemoveEXITONDNSERRORUnderEnvironmentBeforeEnabling"));
-            return;
-        }
-
+        var conflict = false;
         WebSocketBackoffCheckBox.IsEnabled = false;
         try
         {
-            await _configService.UpdateAsync(config => config.WebSocketOfflineBackoffEnabled = enabled);
+            var stored = await _configService.UpdateAsync(
+                config => config.WebSocketOfflineBackoffEnabled = enabled,
+                canUpdate: config =>
+                {
+                    conflict = RetryStrategyPolicy.HasConflict(enabled, config.GetEnvironmentValue("exit_on_dns_error"));
+                    return !conflict;
+                });
+            _config.WebSocketOfflineBackoffEnabled = stored.WebSocketOfflineBackoffEnabled;
         }
         catch (Exception ex)
         {
@@ -269,7 +267,16 @@ public sealed partial class ExtraPage : Page
             WebSocketBackoffCheckBox.IsEnabled = true;
         }
 
-        _config.WebSocketOfflineBackoffEnabled = enabled;
+        if (conflict)
+        {
+            WebSocketBackoffCheckBox.IsChecked = _config.WebSocketOfflineBackoffEnabled;
+            App.MainWindow.ShowActionStatus(
+                InfoBarSeverity.Warning,
+                Localization.Get("ConflictingRetrySettings"),
+                Localization.Get("RemoveEXITONDNSERRORUnderEnvironmentBeforeEnabling"));
+            return;
+        }
+
         App.Logger.Info($"WebSocket offline backoff saved: enabled={enabled}");
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,

@@ -45,7 +45,8 @@ internal sealed class ConfigService
         }
     }
 
-    public async Task<AgentConfig> UpdateAsync(Action<AgentConfig> update, CancellationToken cancellationToken = default)
+    public async Task<AgentConfig> UpdateAsync(Action<AgentConfig> update, CancellationToken cancellationToken = default,
+        Func<AgentConfig, bool>? canUpdate = null)
     {
         await WriteGate.WaitAsync(cancellationToken);
         try
@@ -54,6 +55,11 @@ internal sealed class ConfigService
             var document = await ReadDocumentAsync(ManagerPaths.ConfigPath, cancellationToken)
                 ?? JsonSerializer.SerializeToNode(new AgentConfig(), AppJsonContext.Default.AgentConfig)!.AsObject();
             var config = Normalize(document.Deserialize(AppJsonContext.Default.AgentConfig)!);
+            if (canUpdate is not null && !canUpdate(config))
+            {
+                return config;
+            }
+
             var before = JsonSerializer.SerializeToNode(config, AppJsonContext.Default.AgentConfig)!.AsObject();
             update(config);
             var after = JsonSerializer.SerializeToNode(config, AppJsonContext.Default.AgentConfig)!.AsObject();
