@@ -89,7 +89,23 @@ public sealed partial class LogsPage : Page
         }
 
         var enabled = DebugLoggingCheckBox.IsChecked == true;
-        await _configService.SetDebugLoggingAsync(enabled);
+        DebugLoggingCheckBox.IsEnabled = false;
+        try
+        {
+            await _configService.SetDebugLoggingAsync(enabled);
+        }
+        catch (Exception ex)
+        {
+            DebugLoggingCheckBox.IsChecked = !enabled;
+            App.Logger.Error($"Could not save debug logging setting: {ex}");
+            App.MainWindow.ShowActionStatus(InfoBarSeverity.Error, Localization.Get("CouldNotSaveSettings"), ex.Message);
+            return;
+        }
+        finally
+        {
+            DebugLoggingCheckBox.IsEnabled = true;
+        }
+
         App.Logger.SetDebugEnabled(enabled);
         App.Logger.Info($"Manager debug logging {(enabled ? "enabled" : "disabled")}");
         App.MainWindow.ShowActionStatus(
