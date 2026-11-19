@@ -33,7 +33,7 @@ public sealed partial class MainWindow : Window
     private string _lastServiceState = string.Empty;
     private string _lastHubState = string.Empty;
     private bool _exitRequested;
-    private bool _managerUpdateAvailable;
+    private bool _showManagerUpdateInTray;
     private bool _checkingManagerUpdate;
     private bool _firstFrameRendered;
     private bool _hiddenPrewarmInProgress;
@@ -448,7 +448,7 @@ public sealed partial class MainWindow : Window
             {
                 connectionPage.ApplyServiceStatus(status);
             }
-            _trayIconService.SetStatus(status.ServiceState, _managerUpdateAvailable);
+            _trayIconService.SetStatus(status.ServiceState, _showManagerUpdateInTray);
             if (!string.Equals(_lastServiceState, status.ServiceState, StringComparison.OrdinalIgnoreCase))
             {
                 App.Logger.Debug($"Service status changed: {_lastServiceState} -> {status.ServiceState}");
@@ -477,7 +477,7 @@ public sealed partial class MainWindow : Window
             var config = await _configService.LoadAsync();
             if (!config.ManagerUpdateNotifyEnabled)
             {
-                _managerUpdateAvailable = false;
+                _showManagerUpdateInTray = false;
                 _trayIconService.SetStatus(_lastServiceState, false);
                 return;
             }
@@ -496,17 +496,16 @@ public sealed partial class MainWindow : Window
                 // Preferences may have changed while the release request was in flight.
                 if (current.ManagerUpdateIncludePrereleases != config.ManagerUpdateIncludePrereleases)
                 {
-                    _managerUpdateAvailable = false;
                     return;
                 }
-                _managerUpdateAvailable = current.ManagerUpdateNotifyEnabled && release is not null
+                var updateAvailable = current.ManagerUpdateNotifyEnabled && release is not null
                     && (!release.IsPrerelease || current.ManagerUpdateIncludePrereleases)
                     && IsManagerUpdateAvailable(release, current.ManagerUpdateIncludePrereleases)
                     && !string.Equals(VersionComparer.Normalize(current.ManagerUpdateSkipVersion),
                         VersionComparer.Normalize(release.Version), StringComparison.OrdinalIgnoreCase);
-                showBadge = _managerUpdateAvailable && current.ManagerUpdateTrayBadgeEnabled;
+                showBadge = updateAvailable && current.ManagerUpdateTrayBadgeEnabled;
                 current.ManagerUpdateLastCheckAt = DateTimeOffset.Now.ToString("O");
-                if (_managerUpdateAvailable && release is not null
+                if (updateAvailable && release is not null
                     && !string.Equals(current.ManagerUpdateLastNotifiedVersion, release.Version, StringComparison.OrdinalIgnoreCase))
                 {
                     notify = true;
@@ -514,7 +513,8 @@ public sealed partial class MainWindow : Window
                 }
             });
 
-            _trayIconService.SetStatus(_lastServiceState, showBadge);
+            _showManagerUpdateInTray = showBadge;
+            _trayIconService.SetStatus(_lastServiceState, _showManagerUpdateInTray);
             if (notify && release is not null)
             {
                 _trayIconService.ShowNotification(Localization.Get("BeszelAgentManagerUpdateAvailable"),
@@ -1449,23 +1449,34 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        config.ManagerUpdateNotifyEnabled = notify.IsChecked == true;
-        config.ManagerUpdateTrayBadgeEnabled = badge.IsChecked == true;
-        config.ManagerUpdateIncludePrereleases = prereleases.IsChecked == true;
-        config.ManagerUpdateCheckIntervalHours = double.IsNaN(interval.Value)
-            ? 6
-            : Math.Clamp((int)interval.Value, 1, 168);
-        config.ManagerUpdateSkipVersion = skipVersion.Text.Trim();
-        config.ManagerUpdateLastCheckAt = string.Empty;
-        await _configService.UpdateAsync(current =>
+        var notifyEnabled = notify.IsChecked == true;
+        var badgeEnabled = badge.IsChecked == true;
+        try
         {
-            current.ManagerUpdateNotifyEnabled = config.ManagerUpdateNotifyEnabled;
-            current.ManagerUpdateTrayBadgeEnabled = config.ManagerUpdateTrayBadgeEnabled;
-            current.ManagerUpdateIncludePrereleases = config.ManagerUpdateIncludePrereleases;
-            current.ManagerUpdateCheckIntervalHours = config.ManagerUpdateCheckIntervalHours;
-            current.ManagerUpdateSkipVersion = config.ManagerUpdateSkipVersion;
-            current.ManagerUpdateLastCheckAt = string.Empty;
-        });
+            await _configService.UpdateAsync(current =>
+            {
+                current.ManagerUpdateNotifyEnabled = notifyEnabled;
+                current.ManagerUpdateTrayBadgeEnabled = badgeEnabled;
+                current.ManagerUpdateIncludePrereleases = prereleases.IsChecked == true;
+                current.ManagerUpdateCheckIntervalHours = double.IsNaN(interval.Value)
+                    ? 6
+                    : Math.Clamp((int)interval.Value, 1, 168);
+                current.ManagerUpdateSkipVersion = skipVersion.Text.Trim();
+                current.ManagerUpdateLastCheckAt = string.Empty;
+            });
+        }
+        catch (Exception ex)
+        {
+            App.Logger.Error($"Could not save manager update settings: {ex}");
+            ShowGlobalStatus(InfoBarSeverity.Error, Localization.Get("CouldNotSaveSettings"), ex.Message);
+            return;
+        }
+
+        if (!notifyEnabled || !badgeEnabled)
+        {
+            _showManagerUpdateInTray = false;
+            _trayIconService.SetStatus(_lastServiceState, _showManagerUpdateInTray);
+        }
         App.Logger.Info("Manager update settings saved");
         ShowGlobalStatus(InfoBarSeverity.Success, Localization.Get("ManagerUpdateSettingsSaved"), Localization.Get("TheNewUpdatePreferencesAreActive"));
         _ = CheckManagerUpdateInBackgroundAsync();
