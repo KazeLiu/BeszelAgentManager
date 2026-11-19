@@ -1,3 +1,4 @@
+using BeszelAgentManager.Core;
 using BeszelAgentManager.WinUI.Services;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml;
@@ -17,6 +18,7 @@ public sealed partial class ExtraPage : Page
     private AgentConfig _config = new();
     private bool _loading = true;
     private bool _backgroundServiceInstalled;
+    private int _periodicRestartSaveVersion;
 
     public ExtraPage()
     {
@@ -28,6 +30,16 @@ public sealed partial class ExtraPage : Page
     {
         _loading = true;
         _config = await _configService.LoadAsync();
+        PopulatePeriodicRestartControls();
+        WebSocketBackoffCheckBox.IsChecked = _config.WebSocketOfflineBackoffEnabled;
+        LanguageComboBox.SelectedIndex = _config.UiLanguage == "zh-Hans" ? 1 : 0;
+        UpdateDefenderButton();
+        _loading = false;
+        await RefreshBackgroundServiceStatusAsync(showNotification: false);
+    }
+
+    private void PopulatePeriodicRestartControls()
+    {
         AutoRestartCheckBox.IsChecked = _config.AutoRestartEnabled;
         var unit = NormalizeRestartUnit(_config.AutoRestartIntervalUnit);
         RestartIntervalTextBox.Text = (_config.AutoRestartIntervalValue > 0
@@ -36,12 +48,7 @@ public sealed partial class ExtraPage : Page
                 ? _config.AutoRestartIntervalHours
                 : 24).ToString();
         RestartIntervalUnitComboBox.SelectedIndex = unit == "minutes" ? 1 : 0;
-        WebSocketBackoffCheckBox.IsChecked = _config.WebSocketOfflineBackoffEnabled;
-        LanguageComboBox.SelectedIndex = _config.UiLanguage == "zh-Hans" ? 1 : 0;
         UpdatePeriodicRestartControlState();
-        UpdateDefenderButton();
-        _loading = false;
-        await RefreshBackgroundServiceStatusAsync(showNotification: false);
     }
 
     private async void LanguageComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -234,11 +241,10 @@ public sealed partial class ExtraPage : Page
             return;
         }
 
-        _config.WebSocketOfflineBackoffEnabled = WebSocketBackoffCheckBox.IsChecked == true;
-        if (_config.HasRetryStrategyConflict())
+        var enabled = WebSocketBackoffCheckBox.IsChecked == true;
+        if (RetryStrategyPolicy.HasConflict(enabled, _config.GetEnvironmentValue("exit_on_dns_error")))
         {
-            _config.WebSocketOfflineBackoffEnabled = false;
-            WebSocketBackoffCheckBox.IsChecked = false;
+            WebSocketBackoffCheckBox.IsChecked = _config.WebSocketOfflineBackoffEnabled;
             App.MainWindow.ShowActionStatus(
                 InfoBarSeverity.Warning,
                 Localization.Get("ConflictingRetrySettings"),
@@ -246,8 +252,25 @@ public sealed partial class ExtraPage : Page
             return;
         }
 
-        await _configService.UpdateAsync(config => config.WebSocketOfflineBackoffEnabled = _config.WebSocketOfflineBackoffEnabled);
-        App.Logger.Info($"WebSocket offline backoff saved: enabled={_config.WebSocketOfflineBackoffEnabled}");
+        WebSocketBackoffCheckBox.IsEnabled = false;
+        try
+        {
+            await _configService.UpdateAsync(config => config.WebSocketOfflineBackoffEnabled = enabled);
+        }
+        catch (Exception ex)
+        {
+            WebSocketBackoffCheckBox.IsChecked = _config.WebSocketOfflineBackoffEnabled;
+            App.Logger.Error($"Could not save WebSocket offline backoff: {ex}");
+            App.MainWindow.ShowActionStatus(InfoBarSeverity.Error, Localization.Get("CouldNotSaveSettings"), ex.Message);
+            return;
+        }
+        finally
+        {
+            WebSocketBackoffCheckBox.IsEnabled = true;
+        }
+
+        _config.WebSocketOfflineBackoffEnabled = enabled;
+        App.Logger.Info($"WebSocket offline backoff saved: enabled={enabled}");
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,
             Localization.Get("WebSocketBackoffSaved"),
@@ -294,21 +317,46 @@ public sealed partial class ExtraPage : Page
             return;
         }
 
-        _config.AutoRestartEnabled = AutoRestartCheckBox.IsChecked == true;
-        _config.AutoRestartIntervalValue = interval;
-        _config.AutoRestartIntervalUnit = unit;
-        _config.AutoRestartIntervalHours = unit == "hours"
+        var enabled = AutoRestartCheckBox.IsChecked == true;
+        var hours = unit == "hours"
             ? interval
             : Math.Clamp((int)Math.Ceiling(interval / 60d), 1, 168);
+        // Focus loss and a unit change can start separate saves in quick succession.
+        var saveVersion = ++_periodicRestartSaveVersion;
 
-        await _configService.UpdateAsync(config =>
+        try
         {
-            config.AutoRestartEnabled = _config.AutoRestartEnabled;
-            config.AutoRestartIntervalValue = interval;
-            config.AutoRestartIntervalUnit = unit;
-            config.AutoRestartIntervalHours = _config.AutoRestartIntervalHours;
-        });
-        App.Logger.Info($"Periodic service restart saved: enabled={_config.AutoRestartEnabled}, interval={interval} {unit}");
+            await _configService.UpdateAsync(config =>
+            {
+                config.AutoRestartEnabled = enabled;
+                config.AutoRestartIntervalValue = interval;
+                config.AutoRestartIntervalUnit = unit;
+                config.AutoRestartIntervalHours = hours;
+            });
+        }
+        catch (Exception ex)
+        {
+            App.Logger.Error($"Could not save periodic restart settings: {ex}");
+            if (saveVersion == _periodicRestartSaveVersion)
+            {
+                _loading = true;
+                PopulatePeriodicRestartControls();
+                _loading = false;
+                App.MainWindow.ShowActionStatus(InfoBarSeverity.Error, Localization.Get("CouldNotSaveSettings"), ex.Message);
+            }
+            return;
+        }
+
+        _config.AutoRestartEnabled = enabled;
+        _config.AutoRestartIntervalValue = interval;
+        _config.AutoRestartIntervalUnit = unit;
+        _config.AutoRestartIntervalHours = hours;
+        App.Logger.Info($"Periodic service restart saved: enabled={enabled}, interval={interval} {unit}");
+        if (saveVersion != _periodicRestartSaveVersion)
+        {
+            return;
+        }
+
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,
             Localization.Get("PeriodicRestartSaved"),

@@ -82,12 +82,13 @@ public sealed partial class EnvironmentPage : Page
             return;
         }
 
-        _config.EnvActiveNames.Add(name);
-        await SaveAndReportAsync($"Environment variable added: {name}", config =>
+        if (await SaveAndReportAsync($"Environment variable added: {name}", config =>
         {
             if (!config.EnvActiveNames.Contains(name, StringComparer.OrdinalIgnoreCase)) config.EnvActiveNames.Add(name);
-        });
-        RenderRows();
+        }))
+        {
+            RenderRows();
+        }
     }
 
     private void RenderRows()
@@ -206,13 +207,15 @@ public sealed partial class EnvironmentPage : Page
 
         var before = GetEnvironmentValue(state);
         var value = textBox.Text.Trim();
-        SetEnvironmentValue(_config, state, value);
-        textBox.IsReadOnly = true;
-        editButton.Content = Localization.Get("Edit");
-        await SaveAndReportAsync(IsSensitiveEnvironmentName(state.Name)
+        if (await SaveAndReportAsync(IsSensitiveEnvironmentName(state.Name)
             ? $"Environment variable {state.Name} changed (value redacted)"
             : $"Environment variable {state.Name}: {Format(before)} -> {Format(value)}",
-            config => SetEnvironmentValue(config, state, value));
+            config => SetEnvironmentValue(config, state, value)))
+        {
+            textBox.Text = value;
+            textBox.IsReadOnly = true;
+            editButton.Content = Localization.Get("Edit");
+        }
     }
 
     private async Task RemoveEnvironmentRowAsync(Grid row)
@@ -222,14 +225,14 @@ public sealed partial class EnvironmentPage : Page
             return;
         }
 
-        _config.EnvActiveNames.RemoveAll(name => string.Equals(name, state.Name, StringComparison.OrdinalIgnoreCase));
-        _config.EnvCustom.RemoveAll(item => string.Equals(item.Name, state.Name, StringComparison.OrdinalIgnoreCase));
-        await SaveAndReportAsync($"Environment variable removed: {state.Name}", config =>
+        if (await SaveAndReportAsync($"Environment variable removed: {state.Name}", config =>
         {
             config.EnvActiveNames.RemoveAll(name => string.Equals(name, state.Name, StringComparison.OrdinalIgnoreCase));
             config.EnvCustom.RemoveAll(item => string.Equals(item.Name, state.Name, StringComparison.OrdinalIgnoreCase));
-        });
-        RenderRows();
+        }))
+        {
+            RenderRows();
+        }
     }
 
     private string GetEnvironmentValue(EnvRowState state)
@@ -250,14 +253,31 @@ public sealed partial class EnvironmentPage : Page
         config.ExtraFields[state.ConfigKey] = JsonSerializer.SerializeToElement(value, AppJsonContext.Default.String);
     }
 
-    private async Task SaveAndReportAsync(string logMessage, Action<AgentConfig> update)
+    private async Task<bool> SaveAndReportAsync(string logMessage, Action<AgentConfig> update)
     {
-        await _configService.UpdateAsync(update);
+        AddEnvironmentButton.IsEnabled = false;
+        EnvironmentListView.IsEnabled = false;
+        try
+        {
+            _config = await _configService.UpdateAsync(update);
+        }
+        catch (Exception ex)
+        {
+            App.Logger.Error($"Could not save environment settings: {ex}");
+            App.MainWindow.ShowActionStatus(InfoBarSeverity.Error, Localization.Get("CouldNotSaveSettings"), ex.Message);
+            return false;
+        }
+        finally
+        {
+            AddEnvironmentButton.IsEnabled = true;
+            EnvironmentListView.IsEnabled = true;
+        }
         App.Logger.Info(logMessage);
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,
             Localization.Get("EnvironmentSaved"),
             Localization.Get("ApplySettingsWhenYouAreReadyToRestartThe2"));
+        return true;
     }
 
     private static string Format(string value)

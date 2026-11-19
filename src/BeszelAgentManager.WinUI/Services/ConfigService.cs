@@ -45,7 +45,7 @@ internal sealed class ConfigService
         }
     }
 
-    public async Task UpdateAsync(Action<AgentConfig> update, CancellationToken cancellationToken = default)
+    public async Task<AgentConfig> UpdateAsync(Action<AgentConfig> update, CancellationToken cancellationToken = default)
     {
         await WriteGate.WaitAsync(cancellationToken);
         try
@@ -67,6 +67,7 @@ internal sealed class ConfigService
                 if (!JsonNode.DeepEquals(before[field.Key], field.Value)) document[field.Key] = field.Value?.DeepClone();
             }
             await WriteDocumentAsync(ManagerPaths.ConfigPath, document, cancellationToken);
+            return config;
         }
         finally
         {
