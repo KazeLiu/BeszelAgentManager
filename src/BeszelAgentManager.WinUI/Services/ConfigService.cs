@@ -6,24 +6,17 @@ namespace BeszelAgentManager.WinUI.Services;
 
 internal sealed class ConfigService
 {
+    private static readonly SemaphoreSlim WriteGate = new(1, 1);
+
     public async Task<AgentConfig> LoadAsync(CancellationToken cancellationToken = default)
     {
-        if (!File.Exists(ManagerPaths.ConfigPath))
-        {
-            return await ApplyLocalOverridesAsync(new AgentConfig(), cancellationToken);
-        }
-
         try
         {
-            await using var stream = new FileStream(ManagerPaths.ConfigPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var config = Normalize(
-                await JsonSerializer.DeserializeAsync(
-                    stream,
-                    AppJsonContext.Default.AgentConfig,
-                    cancellationToken) ?? new AgentConfig());
+            var document = await ReadDocumentAsync(ManagerPaths.ConfigPath, cancellationToken);
+            var config = Normalize(document is null ? new AgentConfig() : document.Deserialize(AppJsonContext.Default.AgentConfig)!);
             return await ApplyLocalOverridesAsync(config, cancellationToken);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             App.Logger.Error($"Could not load configuration from {ManagerPaths.ConfigPath}: {ex}");
             return await ApplyLocalOverridesAsync(new AgentConfig(), cancellationToken);
@@ -32,41 +25,72 @@ internal sealed class ConfigService
 
     public async Task SetDebugLoggingAsync(bool enabled, CancellationToken cancellationToken = default)
     {
-        JsonObject config;
-        if (File.Exists(ManagerPaths.ConfigPath))
-        {
-            var raw = await File.ReadAllTextAsync(ManagerPaths.ConfigPath, cancellationToken);
-            config = JsonNode.Parse(raw) as JsonObject ?? new JsonObject();
-        }
-        else
-        {
-            config = new JsonObject();
-        }
-
-        config["debug_logging"] = enabled;
         try
         {
-            Directory.CreateDirectory(ManagerPaths.DataDir);
-            await File.WriteAllTextAsync(
-                ManagerPaths.ConfigPath,
-                config.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
-                cancellationToken);
+            await UpdateAsync(config => config.DebugLogging = enabled, cancellationToken);
         }
         catch (UnauthorizedAccessException)
         {
-            var local = new JsonObject { ["debug_logging"] = enabled };
-            Directory.CreateDirectory(Path.GetDirectoryName(ManagerPaths.LocalSettingsPath)!);
-            await File.WriteAllTextAsync(
-                ManagerPaths.LocalSettingsPath,
-                local.ToJsonString(new JsonSerializerOptions { WriteIndented = true }),
-                cancellationToken);
+            await WriteGate.WaitAsync(cancellationToken);
+            try
+            {
+                var local = await ReadDocumentAsync(ManagerPaths.LocalSettingsPath, cancellationToken) ?? new JsonObject();
+                local["debug_logging"] = enabled;
+                await WriteDocumentAsync(ManagerPaths.LocalSettingsPath, local, cancellationToken);
+            }
+            finally
+            {
+                WriteGate.Release();
+            }
         }
     }
 
-    public async Task SaveAsync(AgentConfig config, CancellationToken cancellationToken = default)
+    public async Task UpdateAsync(Action<AgentConfig> update, CancellationToken cancellationToken = default)
     {
-        Directory.CreateDirectory(ManagerPaths.DataDir);
-        var temporaryPath = $"{ManagerPaths.ConfigPath}.{Environment.ProcessId}.tmp";
+        await WriteGate.WaitAsync(cancellationToken);
+        try
+        {
+            // Writers read stored values only, and never replace an unreadable document with defaults.
+            var document = await ReadDocumentAsync(ManagerPaths.ConfigPath, cancellationToken)
+                ?? JsonSerializer.SerializeToNode(new AgentConfig(), AppJsonContext.Default.AgentConfig)!.AsObject();
+            var config = Normalize(document.Deserialize(AppJsonContext.Default.AgentConfig)!);
+            var before = JsonSerializer.SerializeToNode(config, AppJsonContext.Default.AgentConfig)!.AsObject();
+            update(config);
+            var after = JsonSerializer.SerializeToNode(config, AppJsonContext.Default.AgentConfig)!.AsObject();
+            // Preserve unknown and unmodified stored values, including values normalized only for display.
+            foreach (var field in before)
+            {
+                if (!after.ContainsKey(field.Key)) document.Remove(field.Key);
+            }
+            foreach (var field in after)
+            {
+                if (!JsonNode.DeepEquals(before[field.Key], field.Value)) document[field.Key] = field.Value?.DeepClone();
+            }
+            await WriteDocumentAsync(ManagerPaths.ConfigPath, document, cancellationToken);
+        }
+        finally
+        {
+            WriteGate.Release();
+        }
+    }
+
+    private static async Task<JsonObject?> ReadDocumentAsync(string path, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            return await JsonNode.ParseAsync(stream, new JsonNodeOptions { PropertyNameCaseInsensitive = true },
+                new JsonDocumentOptions { CommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true }, cancellationToken)
+                as JsonObject ?? throw new JsonException("The configuration must be a JSON object.");
+        }
+        catch (FileNotFoundException) { return null; }
+        catch (DirectoryNotFoundException) { return null; }
+    }
+
+    private static async Task WriteDocumentAsync(string path, JsonObject document, CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporaryPath = $"{path}.{Environment.ProcessId}.tmp";
         await using (var stream = new FileStream(
             temporaryPath,
             FileMode.Create,
@@ -75,18 +99,15 @@ internal sealed class ConfigService
             bufferSize: 16 * 1024,
             useAsync: true))
         {
-            await JsonSerializer.SerializeAsync(
-                stream,
-                config,
-                AppJsonContext.Default.AgentConfig,
-                cancellationToken);
+            await using var writer = new StreamWriter(stream);
+            await writer.WriteAsync(document.ToJsonString().AsMemory(), cancellationToken);
         }
 
         for (var attempt = 1; ; attempt++)
         {
             try
             {
-                File.Move(temporaryPath, ManagerPaths.ConfigPath, overwrite: true);
+                File.Move(temporaryPath, path, overwrite: true);
                 break;
             }
             catch (Exception ex) when (attempt < 6 && ex is IOException or UnauthorizedAccessException)
@@ -149,7 +170,12 @@ internal sealed class ConfigService
         config.LegacyFileSettings = failed.ToList();
         if (configurationChanged)
         {
-            await SaveAsync(config, cancellationToken);
+            await UpdateAsync(current =>
+            {
+                if (migrated.Contains("KEY_FILE")) current.Key = config.Key;
+                if (migrated.Contains("TOKEN_FILE")) current.Token = config.Token;
+                foreach (var name in migrated) current.ExtraFields.Remove(EnvNameToConfigKey(name));
+            }, cancellationToken);
             if (File.Exists(ManagerPaths.AgentExePath))
             {
                 var applyResult = await App.Broker.ApplyConfigurationAsync();
@@ -157,7 +183,11 @@ internal sealed class ConfigService
                 {
                     config.LastAppliedFingerprint = config.ApplyFingerprint();
                     config.LastAppliedAt = DateTimeOffset.Now.ToString("O");
-                    await SaveAsync(config, cancellationToken);
+                    await UpdateAsync(current =>
+                    {
+                        current.LastAppliedFingerprint = config.LastAppliedFingerprint;
+                        current.LastAppliedAt = config.LastAppliedAt;
+                    }, cancellationToken);
                 }
                 else
                 {

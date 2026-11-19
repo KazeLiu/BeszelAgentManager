@@ -6,6 +6,14 @@ Open **Extra → Language → Switch language** and select **English (original)*
 
 English is the default for new and existing configurations without `ui_language`. The supported values are `en-US` and `zh-Hans`; unsupported values use English. Language changes do not enter the agent configuration fingerprint or alter service commands, environment variable names, log filter identifiers, or update trust.
 
+## Save preferences safely
+
+Use `ConfigService.UpdateAsync` to modify the latest stored configuration inside the shared write lock. The callback changes only the settings owned by that action. The service merges those changes into the original JSON document and replaces the file atomically; existing unreadable or invalid documents cause the update to fail. Local display overrides are loaded only by `LoadAsync`, never by the write path.
+
+Do not save a configuration snapshot captured before a network request or dialog. Background update checks modify only their check/notification metadata and use the latest notification preferences. A non-string `ui_language` falls back to English without discarding other settings.
+
+Use `App.ShowDialogAsync` for content dialogs so the restart prompt and other dialogs share the same queue.
+
 ## Maintain the application strings
 
 - English source strings: `src/BeszelAgentManager.WinUI/Strings/en-US/Resources.resw`.

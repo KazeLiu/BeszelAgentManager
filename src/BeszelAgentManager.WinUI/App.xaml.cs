@@ -18,6 +18,7 @@ namespace BeszelAgentManager.WinUI;
 public partial class App : Application
 {
     private AppInstance? _mainInstance;
+    private static readonly SemaphoreSlim DialogGate = new(1, 1);
     public static MainWindow MainWindow { get; private set; } = null!;
     internal static BackgroundBrokerClient Broker { get; } = new();
     internal static ManagerLogger Logger { get; } = new();
@@ -104,6 +105,19 @@ public partial class App : Application
                 MainWindow.ShowActionStatus(InfoBarSeverity.Warning, Localization.Get("ManagerUpdateNeedsAttention"),
                     Localization.Get("CouldNotVerifyTheUpdateResultCheckTheInstalled"));
             }
+        }
+    }
+
+    internal static async Task<ContentDialogResult> ShowDialogAsync(ContentDialog dialog)
+    {
+        await DialogGate.WaitAsync();
+        try
+        {
+            return await dialog.ShowAsync();
+        }
+        finally
+        {
+            DialogGate.Release();
         }
     }
 

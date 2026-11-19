@@ -46,6 +46,8 @@ public sealed partial class ConnectionPage : Page
         HubUrlTextBox.Text = config.HubUrl;
         FallbackUrlTextBox.Text = config.HubUrlIpFallback;
         FallbackToggleButton.Content = config.HubUrlIpFallbackEnabled ? Localization.Get("Disable") : Localization.Get("Enable");
+        FallbackToggleButton.Tag = config.HubUrlIpFallbackEnabled;
+        ListenToggleButton.Tag = config.Listen is not null;
 
         if (config.Listen is int listen)
         {
@@ -70,12 +72,19 @@ public sealed partial class ConnectionPage : Page
     internal async Task<bool> SaveCurrentConfigAsync(bool logNoChanges = true)
     {
         var before = Snapshot(_config, _autostartEnabled);
-        var persisted = await _configService.LoadAsync();
         UpdateConfigFromControls();
-        _config.LastAppliedFingerprint = persisted.LastAppliedFingerprint;
-        _config.LastAppliedAt = persisted.LastAppliedAt;
-        _config.LastAppliedManagerTasksFingerprint = persisted.LastAppliedManagerTasksFingerprint;
-        await _configService.SaveAsync(_config);
+        await _configService.UpdateAsync(config =>
+        {
+            config.Key = _config.Key;
+            config.Token = _config.Token;
+            config.HubUrl = _config.HubUrl;
+            config.HubUrlIpFallback = _config.HubUrlIpFallback;
+            config.HubUrlIpFallbackEnabled = _config.HubUrlIpFallbackEnabled;
+            config.Listen = _config.Listen;
+            config.AutoUpdateEnabled = _config.AutoUpdateEnabled;
+            config.UpdateIntervalHours = _config.UpdateIntervalHours;
+            config.StartHidden = _config.StartHidden;
+        });
         return LogConnectionChanges(before, Snapshot(_config, _autostartEnabled), logNoChanges);
     }
 
@@ -135,7 +144,7 @@ public sealed partial class ConnectionPage : Page
 
     private static bool IsToggleEnabled(Button button)
     {
-        return string.Equals(button.Content?.ToString(), Localization.Get("Disable"), StringComparison.OrdinalIgnoreCase);
+        return button.Tag is true;
     }
 
     private static int NormalizeHours(int value)
@@ -224,6 +233,7 @@ public sealed partial class ConnectionPage : Page
         }
 
         FallbackToggleButton.Content = IsToggleEnabled(FallbackToggleButton) ? Localization.Get("Enable") : Localization.Get("Disable");
+        FallbackToggleButton.Tag = enable;
         await SaveControlChangeAsync("Hub URL IP fallback state");
         ShowServiceStatus(
             InfoBarSeverity.Informational,
@@ -245,6 +255,7 @@ public sealed partial class ConnectionPage : Page
             ListenToggleButton.Content = Localization.Get("Disable");
         }
 
+        ListenToggleButton.Tag = !disabling;
         await SaveControlChangeAsync("Listen Port state");
         var currentStatus = await _systemStatusService.GetAgentStatusAsync();
         ApplyServiceStatus(currentStatus);
@@ -363,7 +374,7 @@ public sealed partial class ConnectionPage : Page
             ApplyServiceStatus(currentStatus);
             if (!CanRunServiceAction(action, currentStatus))
             {
-                App.Logger.Info($"{displayName} skipped because service state is {currentStatus.ServiceState}");
+                App.Logger.Info($"{action} skipped because service state is {currentStatus.ServiceState}");
                 ShowServiceStatus(
                     InfoBarSeverity.Informational,
                     Localization.Get("0NotRequired", displayName),
@@ -371,7 +382,7 @@ public sealed partial class ConnectionPage : Page
                 return;
             }
 
-            App.Logger.Info($"{displayName} requested");
+            App.Logger.Info($"{action} requested");
             ShowServiceStatus(
                 InfoBarSeverity.Informational,
                 Localization.Get("0InProgress", displayName),
@@ -384,7 +395,7 @@ public sealed partial class ConnectionPage : Page
                     InfoBarSeverity.Success,
                     Localization.Get("0Completed", displayName),
                     GetFriendlyServiceSuccess(action));
-                App.Logger.Info($"{displayName} completed successfully");
+                App.Logger.Info($"{action} completed successfully");
             }
             else
             {
@@ -392,7 +403,7 @@ public sealed partial class ConnectionPage : Page
                     InfoBarSeverity.Error,
                     Localization.Get("0Failed", displayName),
                     GetFriendlyHelperError(exitCode));
-                App.Logger.Error($"{displayName} failed with helper exit code {exitCode}");
+                App.Logger.Error($"{action} failed with helper exit code {exitCode}");
             }
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
@@ -401,12 +412,12 @@ public sealed partial class ConnectionPage : Page
                 InfoBarSeverity.Warning,
                 Localization.Get("0Cancelled", displayName),
                 Localization.Get("TheAdministratorPromptWasCancelled"));
-            App.Logger.Info($"{displayName} cancelled at UAC prompt");
+            App.Logger.Info($"{action} cancelled at UAC prompt");
         }
         catch (Exception ex)
         {
             ShowServiceStatus(InfoBarSeverity.Error, Localization.Get("0Failed", displayName), ex.Message);
-            App.Logger.Error($"{displayName} failed: {ex}");
+            App.Logger.Error($"{action} failed: {ex}");
         }
         finally
         {
@@ -584,7 +595,11 @@ public sealed partial class ConnectionPage : Page
         var config = await _configService.LoadAsync();
         config.LastAppliedFingerprint = config.ApplyFingerprint();
         config.LastAppliedAt = DateTime.Now.ToString("s");
-        await _configService.SaveAsync(config);
+        await _configService.UpdateAsync(current =>
+        {
+            current.LastAppliedFingerprint = config.LastAppliedFingerprint;
+            current.LastAppliedAt = config.LastAppliedAt;
+        });
     }
 
     private static string GetFriendlyServiceSuccess(string action)

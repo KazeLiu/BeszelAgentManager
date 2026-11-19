@@ -60,9 +60,7 @@ public sealed partial class ExtraPage : Page
         LanguageComboBox.IsEnabled = false;
         try
         {
-            var persisted = await _configService.LoadAsync();
-            persisted.UiLanguage = language;
-            await _configService.SaveAsync(persisted);
+            await _configService.UpdateAsync(config => config.UiLanguage = language);
             _config.UiLanguage = language;
         }
         catch (Exception ex)
@@ -88,10 +86,17 @@ public sealed partial class ExtraPage : Page
             CloseButtonText = Localization.Get("Later"),
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await restartDialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(restartDialog) == ContentDialogResult.Primary)
         {
-            var failure = AppInstance.Restart(string.Empty);
-            App.Logger.Error($"Manager restart failed after language change: {failure}");
+            try
+            {
+                var failure = AppInstance.Restart(string.Empty);
+                App.Logger.Error($"Manager restart failed after language change: {failure}");
+            }
+            catch (Exception ex)
+            {
+                App.Logger.Error($"Manager restart threw after language change: {ex}");
+            }
             App.MainWindow.ShowActionStatus(InfoBarSeverity.Error,
                 Localization.Get("ManagerRestartFailed"), Localization.Get("LanguageSavedRestartManually"));
         }
@@ -140,7 +145,7 @@ public sealed partial class ExtraPage : Page
             CloseButtonText = Localization.Get("Cancel"),
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(confirm) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -241,11 +246,7 @@ public sealed partial class ExtraPage : Page
             return;
         }
 
-        var persisted = await _configService.LoadAsync();
-        _config.LastAppliedFingerprint = persisted.LastAppliedFingerprint;
-        _config.LastAppliedAt = persisted.LastAppliedAt;
-        _config.LastAppliedManagerTasksFingerprint = persisted.LastAppliedManagerTasksFingerprint;
-        await _configService.SaveAsync(_config);
+        await _configService.UpdateAsync(config => config.WebSocketOfflineBackoffEnabled = _config.WebSocketOfflineBackoffEnabled);
         App.Logger.Info($"WebSocket offline backoff saved: enabled={_config.WebSocketOfflineBackoffEnabled}");
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,
@@ -300,11 +301,13 @@ public sealed partial class ExtraPage : Page
             ? interval
             : Math.Clamp((int)Math.Ceiling(interval / 60d), 1, 168);
 
-        var persisted = await _configService.LoadAsync();
-        _config.LastAppliedFingerprint = persisted.LastAppliedFingerprint;
-        _config.LastAppliedAt = persisted.LastAppliedAt;
-        _config.LastAppliedManagerTasksFingerprint = persisted.LastAppliedManagerTasksFingerprint;
-        await _configService.SaveAsync(_config);
+        await _configService.UpdateAsync(config =>
+        {
+            config.AutoRestartEnabled = _config.AutoRestartEnabled;
+            config.AutoRestartIntervalValue = interval;
+            config.AutoRestartIntervalUnit = unit;
+            config.AutoRestartIntervalHours = _config.AutoRestartIntervalHours;
+        });
         App.Logger.Info($"Periodic service restart saved: enabled={_config.AutoRestartEnabled}, interval={interval} {unit}");
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,
@@ -364,7 +367,7 @@ public sealed partial class ExtraPage : Page
             CloseButtonText = Localization.Get("Cancel"),
             DefaultButton = ContentDialogButton.Primary,
         };
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(confirm) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -379,7 +382,7 @@ public sealed partial class ExtraPage : Page
             }
 
             _config.DefenderExclusionEnabled = enabling;
-            await _configService.SaveAsync(_config);
+            await _configService.UpdateAsync(config => config.DefenderExclusionEnabled = enabling);
             UpdateDefenderButton();
             App.Logger.Info($"Windows Defender exclusion {(enabling ? "added" : "removed")}");
             App.MainWindow.ShowActionStatus(
@@ -448,7 +451,7 @@ public sealed partial class ExtraPage : Page
             CloseButtonText = Localization.Get("Close"),
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             var package = new DataPackage();
             package.SetText(instructions);
@@ -527,7 +530,7 @@ public sealed partial class ExtraPage : Page
             DefaultButton = ContentDialogButton.Primary,
         };
 
-        var result = await dialog.ShowAsync();
+        var result = await App.ShowDialogAsync(dialog);
         try
         {
             if (result == ContentDialogResult.Primary)
@@ -608,7 +611,7 @@ public sealed partial class ExtraPage : Page
             DefaultButton = ContentDialogButton.Primary,
         };
 
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(confirm) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -658,7 +661,7 @@ public sealed partial class ExtraPage : Page
             DefaultButton = ContentDialogButton.Primary,
         };
 
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             var package = new DataPackage();
             package.SetText(textBox.Text);

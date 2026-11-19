@@ -21,18 +21,15 @@ internal sealed class GitHubTokenService
 
     public async Task SaveTokenAsync(string token, CancellationToken cancellationToken = default)
     {
-        var config = await _configService.LoadAsync(cancellationToken);
-        config.GitHubTokenEncrypted = string.IsNullOrWhiteSpace(token)
+        var encrypted = string.IsNullOrWhiteSpace(token)
             ? string.Empty
             : Encrypt(token.Trim());
-        await _configService.SaveAsync(config, cancellationToken);
+        await _configService.UpdateAsync(config => config.GitHubTokenEncrypted = encrypted, cancellationToken);
     }
 
     public async Task ClearSavedTokenAsync(CancellationToken cancellationToken = default)
     {
-        var config = await _configService.LoadAsync(cancellationToken);
-        config.GitHubTokenEncrypted = string.Empty;
-        await _configService.SaveAsync(config, cancellationToken);
+        await _configService.UpdateAsync(config => config.GitHubTokenEncrypted = string.Empty, cancellationToken);
     }
 
     private static string Encrypt(string plaintext)

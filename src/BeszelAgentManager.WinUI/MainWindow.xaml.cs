@@ -248,7 +248,7 @@ public sealed partial class MainWindow : Window
 
     private async Task RunTrayServiceActionAsync(string action, string displayName)
     {
-        App.Logger.Info($"{displayName} requested from tray");
+        App.Logger.Info($"{action} requested from tray");
         try
         {
             var exitCode = await App.Broker.RunServiceActionAsync(action);
@@ -265,17 +265,17 @@ public sealed partial class MainWindow : Window
                 "restart" => Localization.Get("BeszelAgentWasRestarted"),
                 _ => Localization.Get("TheServiceActionCompleted"),
             };
-            App.Logger.Info($"{displayName} completed successfully from tray");
+            App.Logger.Info($"{action} completed successfully from tray");
             _trayIconService.ShowNotification(Localization.Get("0Completed", displayName), message);
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
-            App.Logger.Info($"{displayName} cancelled at UAC prompt from tray");
+            App.Logger.Info($"{action} cancelled at UAC prompt from tray");
             _trayIconService.ShowNotification(Localization.Get("0Cancelled", displayName), Localization.Get("TheAdministratorPromptWasCancelled"), NotificationIcon.Warning);
         }
         catch (Exception ex)
         {
-            App.Logger.Error($"{displayName} failed from tray: {ex}");
+            App.Logger.Error($"{action} failed from tray: {ex}");
             _trayIconService.ShowNotification(Localization.Get("0Failed", displayName), ex.Message, NotificationIcon.Error);
         }
     }
@@ -489,25 +489,37 @@ public sealed partial class MainWindow : Window
             }
 
             var release = await _managerUpdateService.FetchLatestReleaseAsync(config.ManagerUpdateIncludePrereleases);
-            config.ManagerUpdateLastCheckAt = DateTimeOffset.Now.ToString("O");
-            _managerUpdateAvailable = release is not null
-                && IsManagerUpdateAvailable(release, config.ManagerUpdateIncludePrereleases)
-                && !string.Equals(
-                    VersionComparer.Normalize(config.ManagerUpdateSkipVersion),
-                    VersionComparer.Normalize(release.Version),
-                    StringComparison.OrdinalIgnoreCase);
-            _trayIconService.SetStatus(_lastServiceState, _managerUpdateAvailable && config.ManagerUpdateTrayBadgeEnabled);
-            if (_managerUpdateAvailable
-                && release is not null
-                && !string.Equals(config.ManagerUpdateLastNotifiedVersion, release.Version, StringComparison.OrdinalIgnoreCase))
+            var notify = false;
+            var showBadge = false;
+            await _configService.UpdateAsync(current =>
             {
-                _trayIconService.ShowNotification(
-                    Localization.Get("BeszelAgentManagerUpdateAvailable"),
-                    Localization.Get("Version0IsAvailable", release.Version));
-                config.ManagerUpdateLastNotifiedVersion = release.Version;
-            }
+                // Preferences may have changed while the release request was in flight.
+                if (current.ManagerUpdateIncludePrereleases != config.ManagerUpdateIncludePrereleases)
+                {
+                    _managerUpdateAvailable = false;
+                    return;
+                }
+                _managerUpdateAvailable = current.ManagerUpdateNotifyEnabled && release is not null
+                    && (!release.IsPrerelease || current.ManagerUpdateIncludePrereleases)
+                    && IsManagerUpdateAvailable(release, current.ManagerUpdateIncludePrereleases)
+                    && !string.Equals(VersionComparer.Normalize(current.ManagerUpdateSkipVersion),
+                        VersionComparer.Normalize(release.Version), StringComparison.OrdinalIgnoreCase);
+                showBadge = _managerUpdateAvailable && current.ManagerUpdateTrayBadgeEnabled;
+                current.ManagerUpdateLastCheckAt = DateTimeOffset.Now.ToString("O");
+                if (_managerUpdateAvailable && release is not null
+                    && !string.Equals(current.ManagerUpdateLastNotifiedVersion, release.Version, StringComparison.OrdinalIgnoreCase))
+                {
+                    notify = true;
+                    current.ManagerUpdateLastNotifiedVersion = release.Version;
+                }
+            });
 
-            await _configService.SaveAsync(config);
+            _trayIconService.SetStatus(_lastServiceState, showBadge);
+            if (notify && release is not null)
+            {
+                _trayIconService.ShowNotification(Localization.Get("BeszelAgentManagerUpdateAvailable"),
+                    Localization.Get("Version0IsAvailable", release.Version));
+            }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
         {
@@ -551,7 +563,7 @@ public sealed partial class MainWindow : Window
             HubStatusLink.Content = fallbackActive ? Localization.Get("HubFallbackUnreachable") : Localization.Get("HubUnreachable");
         }
 
-        var hubState = HubStatusLink.Content?.ToString() ?? string.Empty;
+        var hubState = $"configured={status.IsConfigured}, reachable={status.IsReachable}, fallback={fallbackActive}";
         if (!string.Equals(_lastHubState, hubState, StringComparison.Ordinal))
         {
             App.Logger.Debug($"Hub status changed: {hubState}");
@@ -598,7 +610,7 @@ public sealed partial class MainWindow : Window
                 DefaultButton = ContentDialogButton.Primary,
             };
 
-            var result = await dialog.ShowAsync();
+            var result = await App.ShowDialogAsync(dialog);
             if (result == ContentDialogResult.Primary)
             {
                 await InstallManagerReleaseAsync(release);
@@ -634,7 +646,7 @@ public sealed partial class MainWindow : Window
         await RunAgentOperationAsync(
             InstallAgentButton,
             Localization.Get("Installing"),
-            Localization.Get("InstallAgent"),
+            "InstallAgent",
             confirmationTitle,
             confirmationMessage,
             async () =>
@@ -677,7 +689,7 @@ public sealed partial class MainWindow : Window
             DefaultButton = ContentDialogButton.Primary,
         };
 
-        var result = await dialog.ShowAsync();
+        var result = await App.ShowDialogAsync(dialog);
         if (result == ContentDialogResult.Secondary)
         {
             NavigateToExtraPage();
@@ -811,7 +823,7 @@ public sealed partial class MainWindow : Window
         await RunAgentOperationAsync(
             UpdateAgentButton,
             Localization.Get("Updating"),
-            Localization.Get("UpdateAgent"),
+            "UpdateAgent",
             Localization.Get("UpdateBeszelAgent"),
             Localization.Get("ThisWillDownloadTheLatestStableBeszelAgentAnd"),
             App.Broker.UpdateAgentAsync,
@@ -842,7 +854,7 @@ public sealed partial class MainWindow : Window
         await RunAgentOperationAsync(
             UninstallAgentButton,
             Localization.Get("Uninstalling"),
-            Localization.Get("UninstallAgent"),
+            "UninstallAgent",
             Localization.Get("UninstallBeszelAgent"),
             string.Empty,
             () => App.Broker.UninstallAgentAsync(keepAgentLogs.Value),
@@ -913,7 +925,7 @@ public sealed partial class MainWindow : Window
                 DefaultButton = ContentDialogButton.Primary,
             };
 
-            var result = await dialog.ShowAsync();
+            var result = await App.ShowDialogAsync(dialog);
             if (result != ContentDialogResult.Primary || picker.SelectedIndex < 0)
             {
                 return;
@@ -923,7 +935,7 @@ public sealed partial class MainWindow : Window
             await RunAgentOperationAsync(
                 ManageAgentVersionButton,
                 Localization.Get("Installing"),
-                Localization.Get("InstallAgentVersion"),
+                "InstallAgentVersion",
                 Localization.Get("InstallBeszelAgent0", selected.Version),
                 Localization.Get("ThisWillInstallTheSelectedVersionAndRestartThe"),
                 () => App.Broker.InstallAgentVersionAsync(selected.Version),
@@ -992,7 +1004,11 @@ public sealed partial class MainWindow : Window
 
                 config.LastAppliedFingerprint = currentFingerprint;
                 config.LastAppliedAt = DateTime.Now.ToString("s");
-                await _configService.SaveAsync(config);
+                await _configService.UpdateAsync(current =>
+                {
+                    current.LastAppliedFingerprint = config.LastAppliedFingerprint;
+                    current.LastAppliedAt = config.LastAppliedAt;
+                });
                 await RefreshServiceStatusNowAsync();
             }
 
@@ -1005,7 +1021,7 @@ public sealed partial class MainWindow : Window
                 }
 
                 config.LastAppliedManagerTasksFingerprint = currentManagerTasksFingerprint;
-                await _configService.SaveAsync(config);
+                await _configService.UpdateAsync(current => current.LastAppliedManagerTasksFingerprint = currentManagerTasksFingerprint);
             }
 
             App.Logger.Info("Settings applied successfully");
@@ -1037,7 +1053,7 @@ public sealed partial class MainWindow : Window
     private async Task RunAgentOperationAsync(
         Button button,
         string busyText,
-        string operationName,
+        string operationKey,
         string confirmationTitle,
         string confirmationMessage,
         Func<Task<int>> operation,
@@ -1045,6 +1061,7 @@ public sealed partial class MainWindow : Window
         bool skipConfirmation = false,
         Func<Task>? afterSuccess = null)
     {
+        var operationName = Localization.Get(operationKey);
         if (!skipConfirmation)
         {
             var confirm = new ContentDialog
@@ -1060,7 +1077,7 @@ public sealed partial class MainWindow : Window
                 CloseButtonText = Localization.Get("Cancel"),
                 DefaultButton = ContentDialogButton.Primary,
             };
-            if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+            if (await App.ShowDialogAsync(confirm) != ContentDialogResult.Primary)
             {
                 return;
             }
@@ -1069,7 +1086,7 @@ public sealed partial class MainWindow : Window
         var originalContent = button.Content;
         SetAgentButtonsEnabled(false);
         button.Content = busyText;
-        App.Logger.Info($"{operationName} requested");
+        App.Logger.Info($"{operationKey} requested");
         ShowGlobalStatus(
             InfoBarSeverity.Informational,
             Localization.Get("0InProgress", operationName),
@@ -1089,16 +1106,16 @@ public sealed partial class MainWindow : Window
                 await afterSuccess();
             }
 
-            App.Logger.Info($"{operationName} completed successfully");
+            App.Logger.Info($"{operationKey} completed successfully");
             ShowGlobalStatus(InfoBarSeverity.Success, operationName, successMessage);
         }
         catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
         {
-            App.Logger.Info($"{operationName} cancelled at UAC prompt");
+            App.Logger.Info($"{operationKey} cancelled at UAC prompt");
         }
         catch (Exception ex)
         {
-            App.Logger.Error($"{operationName} failed: {ex}");
+            App.Logger.Error($"{operationKey} failed: {ex}");
             ShowGlobalStatus(InfoBarSeverity.Error, Localization.Get("0Failed", operationName), ex.Message);
         }
         finally
@@ -1151,7 +1168,11 @@ public sealed partial class MainWindow : Window
         var config = await _configService.LoadAsync();
         config.LastAppliedFingerprint = config.ApplyFingerprint();
         config.LastAppliedAt = DateTime.Now.ToString("s");
-        await _configService.SaveAsync(config);
+        await _configService.UpdateAsync(current =>
+        {
+            current.LastAppliedFingerprint = config.LastAppliedFingerprint;
+            current.LastAppliedAt = config.LastAppliedAt;
+        });
     }
 
     private async Task<bool?> ConfirmAgentUninstallAsync(string installedVersion)
@@ -1185,7 +1206,7 @@ public sealed partial class MainWindow : Window
             DefaultButton = ContentDialogButton.Primary,
         };
 
-        return await dialog.ShowAsync() == ContentDialogResult.Primary
+        return await App.ShowDialogAsync(dialog) == ContentDialogResult.Primary
             ? keepLogsCheckBox.IsChecked == true
             : null;
     }
@@ -1217,7 +1238,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = Localization.Get("NotNow"),
             DefaultButton = ContentDialogButton.Close,
         };
-        var add = await dialog.ShowAsync() == ContentDialogResult.Primary;
+        var add = await App.ShowDialogAsync(dialog) == ContentDialogResult.Primary;
         config.DefenderExclusionPrompted = true;
         if (add)
         {
@@ -1231,7 +1252,11 @@ public sealed partial class MainWindow : Window
             App.Logger.Info("Windows Defender exclusion added after agent installation");
         }
 
-        await _configService.SaveAsync(config);
+        await _configService.UpdateAsync(current =>
+        {
+            current.DefenderExclusionPrompted = true;
+            if (add) current.DefenderExclusionEnabled = true;
+        });
     }
 
     private void SetAgentButtonsEnabled(bool enabled)
@@ -1353,7 +1378,7 @@ public sealed partial class MainWindow : Window
                 CloseButtonText = Localization.Get("Cancel"),
                 DefaultButton = ContentDialogButton.Primary,
             };
-            var result = await dialog.ShowAsync();
+            var result = await App.ShowDialogAsync(dialog);
             if (result != ContentDialogResult.Primary)
             {
                 return;
@@ -1419,7 +1444,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = Localization.Get("Cancel"),
             DefaultButton = ContentDialogButton.Primary,
         };
-        if (await dialog.ShowAsync() != ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(dialog) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -1432,7 +1457,15 @@ public sealed partial class MainWindow : Window
             : Math.Clamp((int)interval.Value, 1, 168);
         config.ManagerUpdateSkipVersion = skipVersion.Text.Trim();
         config.ManagerUpdateLastCheckAt = string.Empty;
-        await _configService.SaveAsync(config);
+        await _configService.UpdateAsync(current =>
+        {
+            current.ManagerUpdateNotifyEnabled = config.ManagerUpdateNotifyEnabled;
+            current.ManagerUpdateTrayBadgeEnabled = config.ManagerUpdateTrayBadgeEnabled;
+            current.ManagerUpdateIncludePrereleases = config.ManagerUpdateIncludePrereleases;
+            current.ManagerUpdateCheckIntervalHours = config.ManagerUpdateCheckIntervalHours;
+            current.ManagerUpdateSkipVersion = config.ManagerUpdateSkipVersion;
+            current.ManagerUpdateLastCheckAt = string.Empty;
+        });
         App.Logger.Info("Manager update settings saved");
         ShowGlobalStatus(InfoBarSeverity.Success, Localization.Get("ManagerUpdateSettingsSaved"), Localization.Get("TheNewUpdatePreferencesAreActive"));
         _ = CheckManagerUpdateInBackgroundAsync();
@@ -1492,7 +1525,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = Localization.Get("Cancel"),
             DefaultButton = ContentDialogButton.Primary,
         };
-        if (await confirm.ShowAsync() != ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(confirm) != ContentDialogResult.Primary)
         {
             return;
         }
@@ -1526,7 +1559,7 @@ public sealed partial class MainWindow : Window
             CloseButtonText = Localization.Get("Cancel"),
             DefaultButton = ContentDialogButton.Close,
         };
-        if (await dialog.ShowAsync() == ContentDialogResult.Primary)
+        if (await App.ShowDialogAsync(dialog) == ContentDialogResult.Primary)
         {
             OpenUrl($"https://github.com/{AppInfo.ManagerRepo}/releases/tag/{Uri.EscapeDataString(release.Tag)}");
         }
@@ -1572,7 +1605,7 @@ public sealed partial class MainWindow : Window
             },
             CloseButtonText = Localization.Get("OK"),
         };
-        await dialog.ShowAsync();
+        await App.ShowDialogAsync(dialog);
     }
 
     private void ShowGlobalStatus(InfoBarSeverity severity, string title, string message)

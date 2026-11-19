@@ -83,7 +83,10 @@ public sealed partial class EnvironmentPage : Page
         }
 
         _config.EnvActiveNames.Add(name);
-        await SaveAndReportAsync($"Environment variable added: {name}");
+        await SaveAndReportAsync($"Environment variable added: {name}", config =>
+        {
+            if (!config.EnvActiveNames.Contains(name, StringComparer.OrdinalIgnoreCase)) config.EnvActiveNames.Add(name);
+        });
         RenderRows();
     }
 
@@ -202,12 +205,14 @@ public sealed partial class EnvironmentPage : Page
         }
 
         var before = GetEnvironmentValue(state);
-        SetEnvironmentValue(state, textBox.Text.Trim());
+        var value = textBox.Text.Trim();
+        SetEnvironmentValue(_config, state, value);
         textBox.IsReadOnly = true;
         editButton.Content = Localization.Get("Edit");
         await SaveAndReportAsync(IsSensitiveEnvironmentName(state.Name)
             ? $"Environment variable {state.Name} changed (value redacted)"
-            : $"Environment variable {state.Name}: {Format(before)} -> {Format(textBox.Text.Trim())}");
+            : $"Environment variable {state.Name}: {Format(before)} -> {Format(value)}",
+            config => SetEnvironmentValue(config, state, value));
     }
 
     private async Task RemoveEnvironmentRowAsync(Grid row)
@@ -219,7 +224,11 @@ public sealed partial class EnvironmentPage : Page
 
         _config.EnvActiveNames.RemoveAll(name => string.Equals(name, state.Name, StringComparison.OrdinalIgnoreCase));
         _config.EnvCustom.RemoveAll(item => string.Equals(item.Name, state.Name, StringComparison.OrdinalIgnoreCase));
-        await SaveAndReportAsync($"Environment variable removed: {state.Name}");
+        await SaveAndReportAsync($"Environment variable removed: {state.Name}", config =>
+        {
+            config.EnvActiveNames.RemoveAll(name => string.Equals(name, state.Name, StringComparison.OrdinalIgnoreCase));
+            config.EnvCustom.RemoveAll(item => string.Equals(item.Name, state.Name, StringComparison.OrdinalIgnoreCase));
+        });
         RenderRows();
     }
 
@@ -229,25 +238,21 @@ public sealed partial class EnvironmentPage : Page
         return custom?.Value ?? _config.GetEnvironmentValue(state.ConfigKey);
     }
 
-    private void SetEnvironmentValue(EnvRowState state, string value)
+    private static void SetEnvironmentValue(AgentConfig config, EnvRowState state, string value)
     {
-        var custom = _config.EnvCustom.FirstOrDefault(item => string.Equals(item.Name, state.Name, StringComparison.OrdinalIgnoreCase));
+        var custom = config.EnvCustom.FirstOrDefault(item => string.Equals(item.Name, state.Name, StringComparison.OrdinalIgnoreCase));
         if (custom is not null)
         {
             custom.Value = value;
             return;
         }
 
-        _config.ExtraFields[state.ConfigKey] = JsonSerializer.SerializeToElement(value, AppJsonContext.Default.String);
+        config.ExtraFields[state.ConfigKey] = JsonSerializer.SerializeToElement(value, AppJsonContext.Default.String);
     }
 
-    private async Task SaveAndReportAsync(string logMessage)
+    private async Task SaveAndReportAsync(string logMessage, Action<AgentConfig> update)
     {
-        var persisted = await _configService.LoadAsync();
-        _config.LastAppliedFingerprint = persisted.LastAppliedFingerprint;
-        _config.LastAppliedAt = persisted.LastAppliedAt;
-        _config.LastAppliedManagerTasksFingerprint = persisted.LastAppliedManagerTasksFingerprint;
-        await _configService.SaveAsync(_config);
+        await _configService.UpdateAsync(update);
         App.Logger.Info(logMessage);
         App.MainWindow.ShowActionStatus(
             InfoBarSeverity.Informational,

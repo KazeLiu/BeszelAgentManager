@@ -12,7 +12,7 @@ internal sealed class AgentFingerprintService
         }
         catch (Exception ex)
         {
-            return (false, Localization.Get("FingerprintViewFailed0", ex.Message));
+            return (false, ex.Message);
         }
     }
 }

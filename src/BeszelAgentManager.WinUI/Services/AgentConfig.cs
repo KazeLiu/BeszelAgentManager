@@ -9,6 +9,7 @@ namespace BeszelAgentManager.WinUI.Services;
 internal sealed class AgentConfig
 {
     [JsonPropertyName("ui_language")]
+    [JsonConverter(typeof(UiLanguageConverter))]
     public string UiLanguage { get; set; } = "en-US";
 
     [JsonPropertyName("key")]
