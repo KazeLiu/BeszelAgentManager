@@ -257,6 +257,7 @@ public sealed partial class EnvironmentPage : Page
     {
         AddEnvironmentButton.IsEnabled = false;
         EnvironmentListView.IsEnabled = false;
+        EnvironmentSearchBox.IsEnabled = false;
         try
         {
             _config = await _configService.UpdateAsync(update);
@@ -271,6 +272,7 @@ public sealed partial class EnvironmentPage : Page
         {
             AddEnvironmentButton.IsEnabled = true;
             EnvironmentListView.IsEnabled = true;
+            EnvironmentSearchBox.IsEnabled = true;
         }
         App.Logger.Info(logMessage);
         App.MainWindow.ShowActionStatus(
